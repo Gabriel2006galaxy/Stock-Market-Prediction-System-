@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>StockSense — AI Market Prediction</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap"
+        rel="stylesheet" />
+    <script
+        src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <link rel="stylesheet" href="/static/style.css?v=3" />
+</head>
+
+<body>
+
+    <!-- ── NOISE OVERLAY ── -->
+    <div class="noise"></div>
+
+    <!-- ── SIDEBAR ── -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-icon">◈</span>
+            <span class="logo-text">StockSense</span>
+        </div>
+        <nav class="sidebar-nav">
+            <button class="nav-btn active" data-page="dashboard">
+                <span class="nav-icon">⬡</span><span>Dashboard</span>
+            </button>
+            <button class="nav-btn" data-page="add">
+                <span class="nav-icon">+</span><span>Add Stock</span>
+            </button>
+            <button class="nav-btn" data-page="view">
+                <span class="nav-icon">◎</span><span>View Stock</span>
+            </button>
+            <button class="nav-btn" data-page="all">
+                <span class="nav-icon">≡</span><span>All Stocks</span>
+            </button>
+            <button class="nav-btn" data-page="news">
+                <span class="nav-icon">📰</span><span>Market News</span>
+            </button>
+            <button class="nav-btn" data-page="compare">
+                <span class="nav-icon">⇄</span><span>Compare</span>
+            </button>
+            <button class="nav-btn" data-page="predict">
+                <span class="nav-icon">◈</span><span>AI Predict</span>
+            </button>
+            <button class="nav-btn danger" data-page="manage">
+                <span class="nav-icon">⊘</span><span>Manage</span>
+            </button>
+        </nav>
+        <div class="sidebar-footer">
+            <span class="dot green"></span> Live Data
+        </div>
+    </aside>
+
+    <!-- ── MAIN ── -->
+    <main class="main" id="main">
+
+        <!-- TOPBAR -->
+        <header class="topbar">
+            <button class="hamburger" id="hamburger">☰</button>
+            <div class="topbar-title" id="topbar-title">Dashboard</div>
+            <div class="topbar-right">
+                <span class="ticker-badge" id="market-status">● MARKET</span>
+            </div>
+        </header>
+
+        <!-- ═══ PAGE: DASHBOARD ═══ -->
+        <section class="page active" id="page-dashboard">
+            <div class="hero-grid">
+                <div class="hero-card hero-main">
+                    <div class="hero-tag">AI-POWERED</div>
+                    <h1 class="hero-title">Stock Market<br /><em>Prediction</em><br />Engine</h1>
+                    <p class="hero-sub">RNN · LSTM · GRU models with Genetic Algorithm optimisation for precision forecasts.</p>
+                    <button class="btn-primary" onclick="switchPage('predict')">Run AI Prediction →</button>
+                </div>
+                <div class="stats-col">
+                    <div class="stat-card" id="stat-total">
+                        <div class="stat-val" id="stat-total-val">—</div>
+                        <div class="stat-label">Stocks Tracked</div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-val">3</div>
+                        <div class="stat-label">AI Models</div>
+                    </div>
+                    <div class="stat-card accent2">
+                        <div class="stat-val">15</div>
+                        <div class="stat-label">Day Forecast</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section-header">
+                <h2>Quick Actions</h2>
+            </div>
+            <div class="quick-grid">
+                <div class="quick-card" onclick="switchPage('add')">
+                    <div class="qc-icon">+</div>
+                    <div class="qc-label">Add Stock</div>
+                </div>
+                <div class="quick-card" onclick="switchPage('view')">
+                    <div class="qc-icon">◎</div>
+                    <div class="qc-label">View Chart</div>
+                </div>
+                <div class="quick-card" onclick="switchPage('compare')">
+                    <div class="qc-icon">⇄</div>
+                    <div class="qc-label">Compare</div>
+                </div>
+                <div class="quick-card highlight" onclick="switchPage('predict')">
+                    <div class="qc-icon">◈</div>
+                    <div class="qc-label">AI Predict</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ PAGE: ADD STOCK ═══ -->
+        <section class="page" id="page-add">
+            <div class="page-header">
+                <h2>Add Stock</h2>
+                <p>Track a new equity by entering its details below</p>
+            </div>
+            <div class="form-card">
+                <div class="form-group">
+                    <label>Company Name</label>
+                    <input type="text" id="add-name" placeholder="e.g. Infosys Limited" autocomplete="off" />
+                </div>
+                <div class="form-group">
+                    <label>Ticker Symbol</label>
+                    <input type="text" id="add-symbol" placeholder="e.g. INFY.NS" autocomplete="off" />
+                    <span class="form-hint">Append .NS for NSE, .BO for BSE, no suffix for US stocks</span>
+                </div>
+                <button class="btn-primary" id="add-btn" onclick="addStock()">Add Stock</button>
+                <div class="form-status" id="add-status"></div>
+            </div>
+        </section>
+
+        <!-- ═══ PAGE: VIEW STOCK ═══ -->
+        <section class="page" id="page-view">
+            <div class="page-header">
+                <h2>View Stock</h2>
+                <p>Candlestick chart and price data for the last 3 months</p>
+            </div>
+            <div class="control-bar">
+                <select id="view-select" class="styled-select">
+                    <option value="">— Select a stock —</option>
+                </select>
+                <button class="btn-primary" onclick="loadView()">Load Chart</button>
+            </div>
+            <div id="view-result" class="hidden">
+                <div class="chart-header" id="view-chart-header"></div>
+                <div id="view-chart" class="chart-box"></div>
+                <div class="data-table-wrap">
+                    <table class="data-table" id="view-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Open</th>
+                                <th>High</th>
+                                <th>Low</th>
+                                <th>Close</th>
+                                <th>Volume</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="section-header">
+                    <h3>Recent News</h3>
+                </div>
+                <div id="view-news" class="news-wrap"></div>
+            </div>
+            <div class="loader hidden" id="view-loader">
+                <div class="spinner"></div><span>Fetching market data…</span>
+            </div>
+        </section>
+
+        <!-- ═══ PAGE: ALL STOCKS ═══ -->
+        <section class="page" id="page-all">
+            <div class="page-header">
+                <h2>All Tracked Stocks</h2>
+                <p>Your complete watchlist</p>
+            </div>
+            <div id="all-list" class="stock-grid"></div>
+        </section>
+
+        <!-- ═══ PAGE: NEWS ═══ -->
+        <section class="page" id="page-news">
+            <div class="page-header">
+                <h2>Portfolio News Feed</h2>
+                <p>Live, aggregated news affecting the companies in your database</p>
+            </div>
+            <div id="market-news-feed"></div>
+        </section>
+
+        <!-- ═══ PAGE: COMPARE ═══ -->
+        <section class="page" id="page-compare">
+            <div class="page-header">
+                <h2>Compare Stocks</h2>
+                <p>Side-by-side candlestick analysis of two equities</p>
+            </div>
+            <div class="control-bar two-col">
+                <div>
+                    <label class="ctrl-label">First Stock</label>
+                    <select id="cmp-s1" class="styled-select">
+                        <option value="">— Select —</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="ctrl-label">Second Stock</label>
+                    <select id="cmp-s2" class="styled-select">
+                        <option value="">— Select —</option>
+                    </select>
+                </div>
+                <button class="btn-primary" onclick="compareStocks()">Compare</button>
+            </div>
+            <div class="loader hidden" id="cmp-loader">
+                <div class="spinner"></div><span>Loading comparison…</span>
+            </div>
+            <div id="cmp-result" class="hidden">
+                <div class="compare-charts">
+                    <div class="compare-panel" id="cmp-panel-1">
+                        <div class="compare-label" id="cmp-label-1"></div>
+                        <div id="cmp-chart-1" class="chart-box"></div>
+                        <div class="compare-stats" id="cmp-stats-1"></div>
+                        <div class="section-header" style="margin-top:20px">
+                            <h4>Recent News</h4>
+                        </div>
+                        <div id="cmp-news-1" class="news-wrap"></div>
+                    </div>
+                    <div class="compare-panel" id="cmp-panel-2">
+                        <div class="compare-label" id="cmp-label-2"></div>
+                        <div id="cmp-chart-2" class="chart-box"></div>
+                        <div class="compare-stats" id="cmp-stats-2"></div>
+                        <div class="section-header" style="margin-top:20px">
+                            <h4>Recent News</h4>
+                        </div>
+                        <div id="cmp-news-2" class="news-wrap"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ PAGE: PREDICT ═══ -->
+        <section class="page" id="page-predict">
+            <div class="page-header">
+                <h2>AI Prediction Engine</h2>
+                <p>Deep neural network learning with Genetic Algorithm hyperparameter optimisation</p>
+            </div>
+            <div class="predict-controls">
+                <div class="control-bar">
+                    <select id="pred-select" class="styled-select wide">
+                        <option value="">— Select a stock —</option>
+                    </select>
+                </div>
+                <div class="algo-cards">
+                    <label class="algo-card rnn-card">
+                        <input type="checkbox" id="use-rnn" checked />
+                        <span class="algo-name">RNN + GA</span>
+                        <span class="algo-desc">Genetic Algorithm optimised</span>
+                    </label>
+                    <label class="algo-card lstm-card">
+                        <input type="checkbox" id="use-lstm" checked />
+                        <span class="algo-name">LSTM</span>
+                        <span class="algo-desc">Long short-term memory</span>
+                    </label>
+                    <label class="algo-card gru-card">
+                        <input type="checkbox" id="use-gru" checked />
+                        <span class="algo-name">GRU</span>
+                        <span class="algo-desc">Gated recurrent unit</span>
+                    </label>
+                </div>
+                <button class="btn-primary large" id="pred-btn" onclick="runPrediction()">▶ Run AI Prediction</button>
+            </div>
+            <div class="loader hidden" id="pred-loader">
+                <div class="spinner"></div>
+                <div>
+                    <span id="pred-status">Training models… This takes ~60 seconds</span>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="pred-progress"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="pred-result" class="hidden">
+                <!-- consensus -->
+                <div class="consensus-banner" id="consensus-banner"></div>
+                <!-- leaderboard -->
+                <div class="section-header">
+                    <h3>Accuracy Leaderboard</h3>
+                </div>
+                <div class="leaderboard" id="leaderboard"></div>
+                <!-- charts -->
+                <div class="section-header">
+                    <h3>Prediction Charts</h3>
+                </div>
+                <div class="pred-charts-wrap" id="pred-charts"></div>
+                <!-- tables -->
+                <div class="section-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3>Predicted Price Tables</h3>
+                    <button class="btn-primary" onclick="exportPredictionsCSV()">Download CSV ⬇</button>
+                </div>
+                <div class="pred-tables-wrap" id="pred-tables"></div>
+                <!-- news -->
+                <div class="section-header">
+                    <h3>Recent News</h3>
+                </div>
+                <div id="pred-news" class="news-wrap"></div>
+            </div>
+        </section>
+
+        <!-- ═══ PAGE: MANAGE ═══ -->
+        <section class="page" id="page-manage">
+            <div class="page-header">
+                <h2>Manage Stocks</h2>
+                <p>Delete individual stocks or clear your entire watchlist</p>
+            </div>
+            <div class="manage-grid">
+                <div class="manage-card">
+                    <h3>Delete Stock</h3>
+                    <p>Remove a single stock from your watchlist</p>
+                    <select id="del-select" class="styled-select">
+                        <option value="">— Select a stock —</option>
+                    </select>
+                    <button class="btn-danger" onclick="deleteStock()">Delete Selected</button>
+                    <div class="form-status" id="del-status"></div>
+                </div>
+                <div class="manage-card danger-card">
+                    <h3>⚠ Delete All Stocks</h3>
+                    <p>Permanently remove every stock from the database. This cannot be undone.</p>
+                    <button class="btn-danger" onclick="confirmDeleteAll()">Delete All Stocks</button>
+                    <div class="form-status" id="del-all-status"></div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- TOAST -->
+    <div class="toast" id="toast"></div>
+
+    <script src="/static/app.js?v=7"></script>
+</body>
+
+</html>
