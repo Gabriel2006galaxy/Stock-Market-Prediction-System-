@@ -341,6 +341,20 @@ def get_stocks():
     return jsonify(stocks)
 
 
+@app.route("/api/validate/<symbol>")
+def validate_stock(symbol):
+    """Check if a stock symbol is valid by trying to fetch data from yfinance."""
+    try:
+        symbol_clean = symbol.upper().strip()
+        # Try to fetch 1 day of data; if it fails, symbol is invalid
+        df = yf.download(symbol_clean, period="1d", progress=False, threads=False)
+        if df is None or df.empty:
+            return jsonify({"valid": False, "error": f"No market data found for {symbol_clean}"}), 400
+        return jsonify({"valid": True, "symbol": symbol_clean})
+    except Exception as e:
+        return jsonify({"valid": False, "error": f"Invalid ticker: {str(e)[:100]}"}), 400
+
+
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
     data = request.json or {}
@@ -348,10 +362,18 @@ def add_stock():
     name = data.get("name", "").strip()
 
     if not symbol or not name:
-        return jsonify({"error": "symbol and name are required"}), 400
+        return jsonify({"error": "⚠️ Symbol and name are required"}), 400
+
+    # Validate ticker exists in market
+    try:
+        df = yf.download(symbol, period="1d", progress=False, threads=False)
+        if df is None or df.empty:
+            return jsonify({"error": f"❌ No market data found for {symbol}. Check ticker spelling."}), 400
+    except Exception as e:
+        return jsonify({"error": f"❌ Invalid ticker symbol: {symbol}. Please verify on Yahoo Finance."}), 400
 
     if not persist_stock(symbol, name):
-        return jsonify({"error": "stock already exists or failed to add"}), 409
+        return jsonify({"error": "⚠️ Stock already in watchlist"}), 409
 
     return jsonify({"success": True, "symbol": symbol, "name": name})
 
