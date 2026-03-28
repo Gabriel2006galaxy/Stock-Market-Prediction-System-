@@ -96,6 +96,7 @@ async function addStock() {
             body: JSON.stringify({ name, symbol })
         });
         const data = await res.json();
+        console.log("addStock response", res.status, data);
 
         if (data.error) {
             setStatus(status, "❌ " + data.error, false);
@@ -108,6 +109,7 @@ async function addStock() {
             toast("Stock added successfully", true);
         }
     } catch (e) {
+        console.error(e);
         setStatus(status, "❌ Server error.", false);
     }
 }

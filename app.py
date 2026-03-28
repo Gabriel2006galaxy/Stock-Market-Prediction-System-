@@ -1,4 +1,5 @@
 import os
+import json
 import traceback
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -37,14 +38,109 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "stocks")
 }
 
-# ✅ FIXED: Safe DB connection
+STOCKS_FILE = Path(os.getenv("STOCKS_FILE", "stocks.json"))
+
+# DB connection: if MySQL is configured/available, use it; otherwise fallback to local JSON store.
 def get_db():
     try:
-        if not DB_CONFIG.get("password"):
-            return None
         return mysql.connector.connect(**DB_CONFIG)
-    except:
+    except Exception:
         return None
+
+
+def read_stock_file():
+    if not STOCKS_FILE.exists():
+        return []
+    try:
+        with STOCKS_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+
+def write_stock_file(items):
+    try:
+        STOCKS_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def get_all_stocks():
+    conn = get_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS companies (symbol VARCHAR(20) PRIMARY KEY, name VARCHAR(255))")
+            cursor.execute("SELECT symbol, name FROM companies")
+            return [{"symbol": s, "name": n} for s, n in cursor.fetchall()]
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    return read_stock_file()
+
+
+def persist_stock(symbol, name):
+    conn = get_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS companies (symbol VARCHAR(20) PRIMARY KEY, name VARCHAR(255))")
+            cursor.execute("INSERT INTO companies (symbol,name) VALUES(%s,%s)", (symbol, name))
+            conn.commit()
+            return True
+        except mysql.connector.Error:
+            return False
+        finally:
+            conn.close()
+
+    stocks = read_stock_file()
+    if any(s["symbol"] == symbol for s in stocks):
+        return False
+    stocks.append({"symbol": symbol, "name": name})
+    write_stock_file(stocks)
+    return True
+
+
+def remove_stock(symbol):
+    conn = get_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM companies WHERE symbol=%s", (symbol,))
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    stocks = read_stock_file()
+    stocks = [s for s in stocks if s.get("symbol") != symbol]
+    write_stock_file(stocks)
+    return True
+
+
+def remove_all_stocks():
+    conn = get_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS companies (symbol VARCHAR(20) PRIMARY KEY, name VARCHAR(255))")
+            cursor.execute("DELETE FROM companies")
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    write_stock_file([])
+    return True
 
 
 def model_file_path(symbol, tag):
@@ -241,46 +337,115 @@ def health():
 # ✅ FIXED DB ROUTES
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
-    conn = get_db()
-    if conn is None:
-        return jsonify([])
-    cursor = conn.cursor()
-    cursor.execute("SELECT symbol, name FROM companies")
-    stocks = [{"symbol": s, "name": n} for s, n in cursor.fetchall()]
-    conn.close()
+    stocks = get_all_stocks()
     return jsonify(stocks)
 
 
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
-    conn = get_db()
-    if conn is None:
-        return jsonify({"error": "Database not configured"}), 500
-
     data = request.json or {}
     symbol = data.get("symbol", "").upper().strip()
     name = data.get("name", "").strip()
 
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO companies (symbol,name) VALUES(%s,%s)", (symbol, name))
-    conn.commit()
-    conn.close()
+    if not symbol or not name:
+        return jsonify({"error": "symbol and name are required"}), 400
 
-    return jsonify({"success": True})
+    if not persist_stock(symbol, name):
+        return jsonify({"error": "stock already exists or failed to add"}), 409
+
+    return jsonify({"success": True, "symbol": symbol, "name": name})
 
 
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
-    conn = get_db()
-    if conn is None:
-        return jsonify({"error": "Database not configured"}), 500
+    cleaned = symbol.upper().strip()
+    if not cleaned:
+        return jsonify({"error": "symbol is required"}), 400
 
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
-    conn.commit()
-    conn.close()
+    if not remove_stock(cleaned):
+        return jsonify({"error": "Failed to delete"}), 500
 
     return jsonify({"success": True})
+
+
+@app.route("/api/stocks/all", methods=["DELETE"])
+def delete_all_stocks():
+    if not remove_all_stocks():
+        return jsonify({"error": "Failed to delete all"}), 500
+    return jsonify({"success": True})
+
+
+def get_stock_market_data(symbol, period="3mo"):
+    df = clean_ohlcv(yf.download(symbol, period=period, interval='1d', progress=False, threads=False))
+    if df.empty:
+        return None
+
+    o = float(df['Open'][0])
+    c = float(df['Close'][-1])
+    change = round(c - o, 2)
+    percent = round((c - o) / o * 100, 2) if o else 0
+    trend = 'up' if change >= 0 else 'down'
+
+    return {
+        'symbol': symbol.upper(),
+        'candles': df_to_records(df),
+        'change': change,
+        'percent': percent,
+        'trend': trend,
+        'high': round(float(df['High'].max()), 2),
+        'low': round(float(df['Low'].min()), 2),
+        'avg_vol': int(df['Volume'].mean())
+    }
+
+
+@app.route('/api/view/<symbol>')
+def view_stock(symbol):
+    data = get_stock_market_data(symbol, period='3mo')
+    if not data:
+        return jsonify({'error': 'No market data'}), 404
+
+    # prefer user-friendly name from watchlist
+    all_stocks = get_all_stocks()
+    stock = next((s for s in all_stocks if s.get('symbol') == symbol.upper()), None)
+    data['name'] = stock.get('name') if stock else symbol.upper()
+
+    return jsonify(data)
+
+
+@app.route('/api/compare')
+def compare_stocks():
+    s1 = request.args.get('s1', '').upper().strip()
+    s2 = request.args.get('s2', '').upper().strip()
+    if not s1 or not s2:
+        return jsonify({'error': 'Two symbols required'}), 400
+
+    d1 = get_stock_market_data(s1, period='3mo')
+    d2 = get_stock_market_data(s2, period='3mo')
+    if not d1 or not d2:
+        return jsonify({'error': 'Failed to load one of the symbols'}), 404
+
+    return jsonify({'stock1': d1, 'stock2': d2})
+
+
+@app.route('/api/news/<symbol>')
+def stock_news(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        raw = ticker.news if hasattr(ticker, 'news') else []
+        if not raw:
+            return jsonify([])
+
+        news_items = []
+        for item in raw[:10]:
+            news_items.append({
+                'title': item.get('title', 'No title'),
+                'link': item.get('link', ''),
+                'summary': item.get('summary', item.get('publisher', '')),
+                'pubDate': item.get('providerPublishTime')
+            })
+        return jsonify(news_items)
+    except Exception:
+        return jsonify([])
 
 
 @app.route("/api/predict/<symbol>")
