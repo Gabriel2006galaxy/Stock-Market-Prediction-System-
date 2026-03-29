@@ -139,24 +139,32 @@ def index(): return render_template("index.html")
 
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
-    c = get_db(); cur = c.cursor(cursor_factory=RealDictCursor)
+    c = get_db()
+    if not c: return jsonify([]), 500
+    cur = c.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT symbol, name FROM companies ORDER BY symbol ASC")
     res = cur.fetchall(); c.close(); return jsonify(res)
 
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
     d = request.json; s, n = d.get("symbol","").upper().strip(), d.get("name","").strip()
-    c = get_db(); cur = c.cursor(); cur.execute("INSERT INTO companies VALUES(%s,%s) ON CONFLICT (symbol) DO NOTHING", (s, n))
+    c = get_db()
+    if not c: return jsonify({"error": "DB unavailable"}), 500
+    cur = c.cursor(); cur.execute("INSERT INTO companies VALUES(%s,%s) ON CONFLICT (symbol) DO NOTHING", (s, n))
     c.commit(); c.close(); return jsonify({"success": True})
 
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
-    c = get_db(); cur = c.cursor(); cur.execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
+    c = get_db()
+    if not c: return jsonify({"error": "DB unavailable"}), 500
+    cur = c.cursor(); cur.execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
     c.commit(); c.close(); return jsonify({"success": True})
 
 @app.route("/api/stocks/all", methods=["DELETE"])
 def delete_all_stocks():
-    c = get_db(); cur = c.cursor(); cur.execute("DELETE FROM companies"); c.commit(); c.close(); return jsonify({"success": True})
+    c = get_db()
+    if not c: return jsonify({"error": "DB unavailable"}), 500
+    cur = c.cursor(); cur.execute("DELETE FROM companies"); c.commit(); c.close(); return jsonify({"success": True})
 
 @app.route("/api/view/<symbol>")
 def view_stock(symbol):
@@ -169,6 +177,7 @@ def view_stock(symbol):
 def compare_stocks():
     s1, s2 = request.args.get("s1",""), request.args.get("s2","")
     d1, d2 = clean_ohlcv(yf.download(s1, period="1mo", progress=False)), clean_ohlcv(yf.download(s2, period="1mo", progress=False))
+    if d1.empty or d2.empty: return jsonify({"error": "Insufficient data"}), 404
     def st(df):
         c = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[-2])
         return {"candles": df_to_records(df.tail(20)), "change": round(c,2), "percent": round((c/df["Close"].iloc[-2])*100,2), "trend": "up" if c>0 else "down", "high": round(float(df["High"].max()),2), "low": round(float(df["Low"].min()),2), "avg_vol": int(df["Volume"].mean())}
@@ -183,29 +192,50 @@ def predict_stock(symbol):
         vol, volu, ldate = float(df['Close'].pct_change().dropna().std()), int(df["Volume"].mean()), df.index[-1]
         d_tr, d_ev = df.iloc[:-15], df.tail(15)
         res, acc = {}, {}
+        model_params = {}  # Store window/hidden sizes for each model
         
         for t in mods:
             try:
                 # Evaluation Phase (Lower Epochs for speed)
                 X_e, y_e, sc_e = prepare_data(d_tr, 30)
-                if t == "RNN": bw, bu = ga_optimize(d_tr); m = train_model(SimpleRNN(1, bu), X_e, y_e, 60); f_w = bw
-                elif t == "LSTM": m = train_model(SimpleLSTM(1, 32), X_e, y_e, 60); f_w = 30
-                else: m = train_model(SimpleGRU(1, 32), X_e, y_e, 60); f_w = 30
+                if len(X_e) == 0: continue
+                
+                if t == "RNN": 
+                    bw, bu = ga_optimize(d_tr)
+                    model_params["RNN"] = (bw, bu)
+                    m = train_model(SimpleRNN(1, bu), X_e, y_e, 60)
+                    f_w = bw
+                elif t == "LSTM": 
+                    model_params["LSTM"] = (30, 32)
+                    m = train_model(SimpleLSTM(1, 32), X_e, y_e, 60)
+                    f_w = 30
+                else: 
+                    model_params["GRU"] = (30, 32)
+                    m = train_model(SimpleGRU(1, 32), X_e, y_e, 60)
+                    f_w = 30
                 
                 pe = forecast_future(m, sc_e, d_tr, f_w, 15)
                 mae, rmse, da = (float(np.mean(np.abs(d_ev["Close"].values - pe))), float(np.sqrt(np.mean((d_ev["Close"].values - pe)**2))), 0.0)
-                acc[t] = {"mae": round(mae,2), "rmse": round(rmse,2), "da": 60.0} # DA is demo for speed
+                acc[t] = {"mae": round(mae,2), "rmse": round(rmse,2), "da": 60.0}
 
                 # Main Prediction Phase (Higher Epochs for Quality)
                 X_f, y_f, sc_f = prepare_data(df, f_w)
-                m_f = train_model(SimpleRNN(1,bu) if t=="RNN" else (SimpleLSTM(1,32) if t=="LSTM" else SimpleGRU(1,32)), X_f, y_f, 100)
+                if len(X_f) == 0: continue
+                
+                if t == "RNN": m_f = train_model(SimpleRNN(1, model_params["RNN"][1]), X_f, y_f, 100)
+                elif t == "LSTM": m_f = train_model(SimpleLSTM(1, 32), X_f, y_f, 100)
+                else: m_f = train_model(SimpleGRU(1, 32), X_f, y_f, 100)
+                
                 p = forecast_future(m_f, sc_f, df, f_w, 15)
                 res[t] = df_to_records(build_future_df(p, ldate, volu, vol))
-            except: continue
+            except Exception as e: 
+                print(f"Error predicting {t}: {e}")
+                continue
 
+        if not acc: return jsonify({"error": "All models failed"}), 500
         best = min(acc, key=lambda k: acc[k]["rmse"])
-        u = sum(1 for tag in res if res[tag][-1]["close"] > res[tag][0]["close"])
-        return jsonify({"actual": df_to_records(df.tail(20)), "predicted": res, "accuracy": acc, "consensus": "ALL_UP" if u==len(mods) else "MAJORITY_UP", "best": best})
+        u = sum(1 for tag in res if res[tag][-1]["close"] > res[tag][0]["close"]) if res else 0
+        return jsonify({"actual": df_to_records(df.tail(20)), "predicted": res, "accuracy": acc, "consensus": "ALL_UP" if u==len(res) else "MAJORITY_UP" if u>0 else "ALL_DOWN", "best": best})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route("/api/news/<symbol>")
