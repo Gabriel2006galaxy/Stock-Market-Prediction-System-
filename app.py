@@ -16,23 +16,19 @@ import json
 
 warnings.filterwarnings("ignore")
 
-app = Flask(__name__)
-CORS(app)
-
 # ─── DB CONNECTION ─────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+app = Flask(__name__)
+CORS(app)
+
+if DATABASE_URL:
+    init_db()
+
 def get_db():
-    if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL, sslmode="require")
-    else:
-        import mysql.connector
-        return mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="Gabriel@2006",
-            database="stocks"
-        )
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL not set in Render")
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def db_fetchall(query, params=()):
     conn = get_db()
@@ -49,6 +45,18 @@ def db_execute(query, params=()):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(query, params)
+    conn.commit()
+    conn.close()
+
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS companies (
+            symbol TEXT PRIMARY KEY,
+            name TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -291,7 +299,10 @@ def add_stock():
     if not symbol or not name:
         return jsonify({"error": "Symbol and name required"}), 400
     try:
-        db_execute("INSERT INTO companies VALUES(%s,%s)", (symbol, name))
+        db_execute(
+            "INSERT INTO companies(symbol, name) VALUES(%s,%s) ON CONFLICT (symbol) DO NOTHING",
+            (symbol, name)
+        )
         return jsonify({"success": True, "symbol": symbol, "name": name})
     except Exception as e:
         return jsonify({"error": str(e)}), 409
