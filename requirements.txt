@@ -7,3 +7,4 @@ scikit-learn
 torch
 gunicorn
 mysql-connector-python
+psycopg2-binary

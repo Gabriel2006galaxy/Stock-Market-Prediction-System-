@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 import mysql.connector
+import psycopg2
+import psycopg2.extras
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -38,14 +40,25 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "stocks")
 }
 
+DATABASE_URL = os.getenv("DATABASE_URL")  # Render Postgres URL
 STOCKS_FILE = Path(os.getenv("STOCKS_FILE", "stocks.json"))
 
-# DB connection: if MySQL is configured/available, use it; otherwise fallback to local JSON store.
+# DB connection: prefer Postgres DATABASE_URL, else fall back to MySQL, else local JSON file.
 def get_db():
-    try:
-        return mysql.connector.connect(**DB_CONFIG)
-    except Exception:
-        return None
+    if DATABASE_URL:
+        try:
+            conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+            return conn
+        except Exception:
+            pass
+
+    if DB_CONFIG.get("password"):
+        try:
+            return mysql.connector.connect(**DB_CONFIG)
+        except Exception:
+            pass
+
+    return None
 
 
 def read_stock_file():
@@ -93,7 +106,8 @@ def persist_stock(symbol, name):
             cursor.execute("INSERT INTO companies (symbol,name) VALUES(%s,%s)", (symbol, name))
             conn.commit()
             return True
-        except mysql.connector.Error:
+        except Exception as e:
+            # duplicate key or any DB constraint means stock exists
             return False
         finally:
             conn.close()
