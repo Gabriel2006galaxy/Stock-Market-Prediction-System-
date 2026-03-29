@@ -3,9 +3,6 @@ from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
 import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import numpy as np
 import yfinance as yf
 import pandas as pd
@@ -112,11 +109,7 @@ def prepare_data(df, window):
         y.append(scaled[i])
     if not X:
         raise ValueError(f"Not enough data for window={window}. Need >{window} rows, got {len(scaled)}")
-    return (
-        torch.tensor(X, dtype=torch.float32),
-        torch.tensor(y, dtype=torch.float32),
-        scaler,
-    )
+    return np.array(X), np.array(y), scaler
 
 def train_model(model, X, y, epochs=80):
     """80 epochs — strong accuracy, finishes in ~1 minute total."""
@@ -240,7 +233,7 @@ def run_single_model(tag, df_train, df_eval, df_full, window,
                      avg_volume, volatility, last_date, results, accuracy, errors):
     """Run one model — isolated so one failure never kills the others."""
     try:
-        random.seed(42); np.random.seed(42); torch.manual_seed(42)
+        random.seed(42); np.random.seed(42)
 
         # ── eval pass (measures accuracy against last 15 real days) ──
         X_e, y_e, sc_e = prepare_data(df_train, window)
