@@ -10,6 +10,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import StandardScaler
 import warnings
 import json
 
@@ -85,7 +86,7 @@ def df_to_records(df):
     return records
 
 def run_single_model(tag, df_train, df_eval, df_full, window,
-                    avg_volume, volatility, last_date, results, accuracy, errors):
+                    avg_volume, volatility, last_date, results, accuracy, errors, models, scalers):
     try:
         # Prepare data
         df_train = df_train.copy()
@@ -103,18 +104,30 @@ def run_single_model(tag, df_train, df_eval, df_full, window,
             model = LinearRegression()
         elif tag == "LSTM":
             model = RandomForestRegressor(n_estimators=50)
-        else:
+        elif tag == "GRU":
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
             model = SVR()
+            model.fit(X_scaled, y)
+            scalers["GRU"] = scaler
 
-        # Train
-        model.fit(X, y)
+        models[tag] = model
+
+        # Train (Already handled for GRU above, others call fit here)
+        if tag != "GRU":
+            model.fit(X, y)
 
         # Predict next 15 days (iterative rolling forecast)
         preds = []
         current_input = X[-1].copy()
 
         for _ in range(15):
-            pred = model.predict([current_input])[0]
+            if tag == "GRU":
+                scaler = scalers["GRU"]
+                scaled_input = scaler.transform([current_input])
+                pred = model.predict(scaled_input)[0]
+            else:
+                pred = model.predict([current_input])[0]
             preds.append(pred)
 
             # shift features forward
@@ -166,7 +179,17 @@ def run_single_model(tag, df_train, df_eval, df_full, window,
             X_eval = df_eval_copy[["Close", "MA5", "MA10", "Return"]].values
             y_true = df_eval_copy["Close"].values
 
-            y_pred = model.predict(X_eval[:len(y_true)])
+            if tag == "GRU":
+                scaler = scalers["GRU"]
+                X_eval_scaled = scaler.transform(X_eval)
+                y_pred = model.predict(X_eval_scaled)
+            else:
+                y_pred = model.predict(X_eval)
+
+            if len(y_pred) != len(y_true):
+                min_len = min(len(y_pred), len(y_true))
+                y_pred = y_pred[:min_len]
+                y_true = y_true[:min_len]
 
             mae = mean_absolute_error(y_true, y_pred)
             rmse = mean_squared_error(y_true, y_pred) ** 0.5
@@ -295,12 +318,14 @@ def predict_stock(symbol):
         results  = {}
         accuracy = {}
         errors   = {}
+        models   = {}
+        scalers  = {}
 
         for tag in models_param:
             run_single_model(
                 tag, df_train, df_eval, df, window,
                 avg_volume, volatility, last_date,
-                results, accuracy, errors
+                results, accuracy, errors, models, scalers
             )
 
         if not results:
