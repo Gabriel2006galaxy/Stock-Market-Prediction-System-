@@ -109,17 +109,19 @@ def prepare_data(df, window):
     )
 
 def train_model(model, X, y, epochs=50):
-    opt = optim.Adam(model.parameters(), lr=0.005)
+    """PyTorch 2.0 compatible"""
+    opt = optim.Adam(model.parameters(), lr=0.001)
     loss_fn = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=15, gamma=0.7)
+    
     for epoch in range(epochs):
         opt.zero_grad()
         pred = model(X)
-        loss = loss_fn(pred, y)
+        # FIXED: Squeeze for shape compatibility
+        loss = loss_fn(pred.squeeze(-1), y.squeeze(-1))
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         opt.step()
-        scheduler.step()
+    
     return model
 
 def ga_optimize(df):
