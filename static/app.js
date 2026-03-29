@@ -681,11 +681,11 @@ async function fetchNews(symbol, containerId) {
     try {
         const res = await fetch(`/api/news/${symbol}`);
         const news = await res.json();
-        if (news.error || !Array.isArray(news) || news.news?.length === 0 || news.length === 0) {
+        const realNews = Array.isArray(news) ? news : (Array.isArray(news.news) ? news.news : []);
+        if (realNews.length === 0) {
             container.innerHTML = `<p style="font-size:12px;color:var(--muted)">${news.error || 'No recent news found.'}</p>`;
             return;
         }
-        let realNews = Array.isArray(news) ? news : (news.news || []);
         let html = '<div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">';
         realNews.forEach(n => {
             let d = n.pubDate ? new Date(n.pubDate).toLocaleDateString() : 'Recent';
@@ -718,9 +718,10 @@ async function renderMarketNews() {
         try {
             const res = await fetch(`/api/news/${s.symbol}`);
             const news = await res.json();
-            if (!news.error) {
-                news.forEach(n => { n.stockSymbol = s.symbol; n.stockName = s.name; });
-                allNews = allNews.concat(news);
+            const realNews = Array.isArray(news) ? news : (Array.isArray(news.news) ? news.news : []);
+            if (realNews.length > 0) {
+                realNews.forEach(n => { n.stockSymbol = s.symbol; n.stockName = s.name; });
+                allNews = allNews.concat(realNews);
             }
         } catch (e) { }
     }));

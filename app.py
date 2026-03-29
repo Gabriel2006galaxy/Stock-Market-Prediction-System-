@@ -495,22 +495,36 @@ def compare_stocks():
 def stock_news(symbol):
     try:
         ticker = yf.Ticker(symbol)
-        raw = ticker.news if hasattr(ticker, 'news') else []
-        if not raw:
-            return jsonify({'error': f'No recent news for {symbol}', 'news': []})
+        raw = None
 
-        news_items = []
-        for item in raw[:10]:
-            news_items.append({
+        if hasattr(ticker, 'news'):
+            raw = ticker.news
+
+        news_list = []
+        if isinstance(raw, list):
+            news_list = raw
+        elif isinstance(raw, dict) and raw.get('news') is not None:
+            candidate = raw.get('news')
+            if isinstance(candidate, list):
+                news_list = candidate
+
+        # yfinance may give an empty list for some symbols; no hard failure
+        if not news_list:
+            return jsonify({'news': [], 'error': f'No recent news found for {symbol}'})
+
+        out = []
+        for item in news_list[:15]:
+            out.append({
                 'title': item.get('title', 'No title'),
                 'link': item.get('link', ''),
-                'summary': item.get('summary', item.get('publisher', '')), 
-                'pubDate': item.get('providerPublishTime')
+                'summary': item.get('summary', item.get('publisher', 'No summary available')),
+                'pubDate': item.get('providerPublishTime', item.get('pubDate', None))
             })
-        return jsonify({'news': news_items})
+
+        return jsonify({'news': out})
     except Exception as e:
         app.logger.error(f"news fetch failed for {symbol}: {e}")
-        return jsonify({'error': 'Failed to fetch news', 'news': []}), 500
+        return jsonify({'news': [], 'error': f'Failed to fetch news for {symbol}'}), 500
 
 
 @app.route("/api/predict/<symbol>")
