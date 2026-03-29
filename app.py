@@ -109,19 +109,22 @@ def prepare_data(df, window):
     )
 
 def train_model(model, X, y, epochs=50):
-    """PyTorch 2.0 compatible"""
     opt = optim.Adam(model.parameters(), lr=0.001)
     loss_fn = nn.MSELoss()
     
+    model.train()
     for epoch in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
-        # FIXED: Squeeze for shape compatibility
-        loss = loss_fn(pred.squeeze(-1), y.squeeze(-1))
+        # PyTorch 2.9 fix: explicit reshape
+        pred = pred.view(-1, 1) 
+        y_target = y.view(-1, 1)
+        loss = loss_fn(pred, y_target)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         opt.step()
     
+    model.eval()
     return model
 
 def ga_optimize(df):
