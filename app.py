@@ -22,8 +22,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 app = Flask(__name__)
 CORS(app)
 
-if DATABASE_URL:
-    init_db()
+# init_db() will be called after definition in the __main__ block
 
 def get_db():
     if not DATABASE_URL:
@@ -59,6 +58,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    init_db()
 
 # ─── MODELS ────────────────────────────────────────────────
 class SimpleRNN(nn.Module):
@@ -455,4 +455,6 @@ def get_news(symbol):
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
+    if DATABASE_URL:
+        init_db()
     app.run(debug=True, host="0.0.0.0", port=5000)
