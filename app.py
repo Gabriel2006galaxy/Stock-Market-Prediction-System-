@@ -9,6 +9,7 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 import warnings
 import json
 
@@ -108,29 +109,78 @@ def run_single_model(tag, df_train, df_eval, df_full, window,
         # Train
         model.fit(X, y)
 
-        # Predict next 15 days
-        last_row = X[-1]
-        future_X = np.tile(last_row, (15, 1))
-        preds = model.predict(future_X)
+        # Predict next 15 days (iterative rolling forecast)
+        preds = []
+        current_input = X[-1].copy()
+
+        for _ in range(15):
+            pred = model.predict([current_input])[0]
+            preds.append(pred)
+
+            # shift features forward
+            prev_close_val = current_input[0]
+
+            current_input[0] = pred
+            current_input[1] = (current_input[1]*4 + pred)/5
+            current_input[2] = (current_input[2]*9 + pred)/10
+
+            if prev_close_val != 0:
+                current_input[3] = (pred - prev_close_val) / prev_close_val
+            else:
+                current_input[3] = 0
 
         # Format output
         future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=15, freq="B")
 
         data = []
+        prev_close = df_train["Close"].iloc[-1]
+
         for d, p in zip(future_dates, preds):
+            open_price = prev_close
+            close_price = p
+
+            high_price = max(open_price, close_price) * (1 + np.random.uniform(0.001, 0.01))
+            low_price = min(open_price, close_price) * (1 - np.random.uniform(0.001, 0.01))
+
             data.append({
                 "date": d.strftime("%Y-%m-%d"),
-                "open": float(p),
-                "high": float(p),
-                "low": float(p),
-                "close": float(p),
+                "open": float(open_price),
+                "high": float(high_price),
+                "low": float(low_price),
+                "close": float(close_price),
                 "volume": int(avg_volume)
             })
 
+            prev_close = close_price
+
         results[tag] = data
 
-        # Dummy accuracy (or compute simple)
-        accuracy[tag] = {"mae": 0, "rmse": 0, "da": 0}
+        # Compute accuracy on eval set
+        df_eval_copy = df_eval.copy()
+        df_eval_copy["MA5"] = df_eval_copy["Close"].rolling(5).mean()
+        df_eval_copy["MA10"] = df_eval_copy["Close"].rolling(10).mean()
+        df_eval_copy["Return"] = df_eval_copy["Close"].pct_change()
+        df_eval_copy = df_eval_copy.dropna()
+
+        if len(df_eval_copy) > 0:
+            X_eval = df_eval_copy[["Close", "MA5", "MA10", "Return"]].values
+            y_true = df_eval_copy["Close"].values
+
+            y_pred = model.predict(X_eval[:len(y_true)])
+
+            mae = mean_absolute_error(y_true, y_pred)
+            rmse = mean_squared_error(y_true, y_pred) ** 0.5
+
+            direction = np.sign(np.diff(y_true)) == np.sign(np.diff(y_pred))
+            da = np.mean(direction) * 100 if len(direction) > 0 else 0
+
+            accuracy[tag] = {
+                "mae": float(round(mae, 2)),
+                "rmse": float(round(rmse, 2)),
+                "da": float(round(da, 2))
+            }
+        else:
+            accuracy[tag] = {"mae": 0, "rmse": 0, "da": 0}
 
     except Exception as e:
         errors[tag] = str(e)
