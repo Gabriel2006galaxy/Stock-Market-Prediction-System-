@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, render_template, Response, stream_with_context
+from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
@@ -13,8 +13,6 @@ from sklearn.preprocessing import MinMaxScaler
 import random
 import warnings
 import json
-import threading
-import time
 
 warnings.filterwarnings("ignore")
 
@@ -22,15 +20,12 @@ app = Flask(__name__)
 CORS(app)
 
 # ─── DB CONNECTION ─────────────────────────────────────────
-# Supports both PostgreSQL (Render) and MySQL (local) via env var
-DATABASE_URL = os.environ.get("DATABASE_URL")  # set on Render
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
     if DATABASE_URL:
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-        return conn
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
     else:
-        # local MySQL fallback
         import mysql.connector
         return mysql.connector.connect(
             host="localhost",
@@ -64,11 +59,9 @@ class SimpleRNN(nn.Module):
         self.rnn = nn.RNN(input_size, hidden_size, num_layers=2,
                           dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
-
     def forward(self, x):
         out, _ = self.rnn(x)
         return self.fc(out[:, -1, :])
-
 
 class SimpleGRU(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -76,11 +69,9 @@ class SimpleGRU(nn.Module):
         self.gru = nn.GRU(input_size, hidden_size, num_layers=2,
                           dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
-
     def forward(self, x):
         out, _ = self.gru(x)
         return self.fc(out[:, -1, :])
-
 
 class SimpleLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -88,11 +79,9 @@ class SimpleLSTM(nn.Module):
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2,
                             dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
-
     def forward(self, x):
         out, _ = self.lstm(x)
         return self.fc(out[:, -1, :])
-
 
 # ─── HELPERS ───────────────────────────────────────────────
 def clean_ohlcv(df):
@@ -104,7 +93,6 @@ def clean_ohlcv(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna()
-
 
 def prepare_data(df, window):
     scaler = MinMaxScaler()
@@ -121,12 +109,11 @@ def prepare_data(df, window):
         scaler,
     )
 
-
-def train_model(model, X, y, epochs=50):
-    """Train with 50 epochs — good accuracy, 2x faster than 100."""
+def train_model(model, X, y, epochs=80):
+    """80 epochs — strong accuracy, finishes in ~1 minute total."""
     opt = optim.Adam(model.parameters(), lr=0.005)
     loss_fn = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=15, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=20, gamma=0.5)
     for _ in range(epochs):
         opt.zero_grad()
         loss = loss_fn(model(X), y)
@@ -135,14 +122,11 @@ def train_model(model, X, y, epochs=50):
         scheduler.step()
     return model
 
-
-def ga_optimize(df, window=20):
+def ga_optimize(df):
     """
-    Genetic Algorithm to find best (window, hidden_units).
-
-    FIX: was using random.choice(tuple) which picks any element from the
-    2-tuple, randomly swapping window and hidden values (47% of offspring
-    had swapped values). Now uses correct index-based crossover.
+    Genetic Algorithm — finds best (window, hidden_units).
+    FIX: was using random.choice(tuple) which swapped window/hidden 47% of
+    the time. Now uses correct index-based crossover.
     """
     def eval_(w, u):
         try:
@@ -150,7 +134,7 @@ def ga_optimize(df, window=20):
             m = SimpleRNN(1, u)
             o = optim.Adam(m.parameters(), lr=0.01)
             l = nn.MSELoss()
-            for _ in range(8):          # reduced from 10
+            for _ in range(8):
                 o.zero_grad()
                 loss = l(m(X), y)
                 loss.backward()
@@ -159,27 +143,20 @@ def ga_optimize(df, window=20):
         except Exception:
             return float("inf")
 
-    # Smaller population & fewer generations = 3x faster, still finds good params
     pop = [(random.randint(10, 30), random.randint(16, 64)) for _ in range(6)]
-    for _ in range(3):                  # reduced from 5 generations
+    for _ in range(3):
         pop = sorted(pop, key=lambda p: eval_(*p))[:3]
         while len(pop) < 6:
             p1, p2 = random.sample(pop, 2)
-            # FIX: use [0]/[1] indexing — not random.choice — to keep (window, units) semantics
-            child_w = p1[0] if random.random() < 0.5 else p2[0]
-            child_u = p1[1] if random.random() < 0.5 else p2[1]
-            # Clamp to valid ranges
-            child_w = max(10, min(30, child_w))
-            child_u = max(16, min(64, child_u))
+            # FIX: index-based crossover keeps window=p[0], hidden=p[1] semantics
+            child_w = max(10, min(30, p1[0] if random.random() < 0.5 else p2[0]))
+            child_u = max(16, min(64, p1[1] if random.random() < 0.5 else p2[1]))
             pop.append((child_w, child_u))
-
     return min(pop, key=lambda p: eval_(*p))
 
-
 def forecast_future(model, scaler, df, window, future_days=15):
-    returns = df["Close"].pct_change().dropna()
-    volatility = float(returns.std())
-    volatility = max(volatility, 1e-6)   # guard against zero volatility
+    returns    = df["Close"].pct_change().dropna()
+    volatility = max(float(returns.std()), 1e-6)
 
     last_seq = scaler.transform(df[["Close"]])[-window:]
     cur = torch.tensor(last_seq.reshape(1, window, 1), dtype=torch.float32)
@@ -188,38 +165,32 @@ def forecast_future(model, scaler, df, window, future_days=15):
     model.eval()
     with torch.no_grad():
         for i in range(future_days):
-            pred = model(cur).item()
-            # Clamp pred to [0, 1] (scaled space) to prevent explosions
-            pred = max(0.0, min(1.0, pred))
-            cf = max(0.3, 1.0 - i * 0.05)
-            noise = np.random.normal(0, volatility * cf * abs(pred) * 0.3)
-            adj = max(0.0, min(1.0, pred + noise))
+            pred = max(0.0, min(1.0, model(cur).item()))
+            cf   = max(0.3, 1.0 - i * 0.05)
+            adj  = max(0.0, min(1.0, pred + np.random.normal(0, volatility * cf * abs(pred) * 0.3)))
             preds.append(adj)
             cur = torch.cat(
-                (cur[:, 1:, :], torch.tensor([[[adj]]], dtype=torch.float32)),
-                dim=1,
+                (cur[:, 1:, :], torch.tensor([[[adj]]], dtype=torch.float32)), dim=1
             )
 
     return scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
 
-
 def build_future_df(preds, last_date, avg_volume, volatility):
-    volatility = max(volatility, 1e-6)
+    volatility   = max(volatility, 1e-6)
     future_dates = pd.date_range(
         start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B"
     )
     rows = {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}
     prev = float(preds[0])
     for i, price in enumerate(preds):
-        price = max(0.01, float(price))   # guard negative price
-        gap = np.random.normal(0, volatility * 0.5)
-        opn = max(0.01, prev * (1 + gap)) if i > 0 else price
-        hi_factor = 1 + np.random.uniform(0.001, min(volatility * 1.5, 0.05))
-        lo_factor = 1 - np.random.uniform(0.001, min(volatility * 1.5, 0.05))
-        hi = max(opn, price) * hi_factor
-        lo = min(opn, price) * lo_factor
-        lo = max(lo, 0.01)               # guard negative low
-        vol = int(avg_volume * max(0.5, np.random.normal(1.0, 0.2)))
+        price      = max(0.01, float(price))
+        gap        = np.random.normal(0, volatility * 0.5)
+        opn        = max(0.01, prev * (1 + gap)) if i > 0 else price
+        hi_factor  = 1 + np.random.uniform(0.001, min(volatility * 1.5, 0.05))
+        lo_factor  = 1 - np.random.uniform(0.001, min(volatility * 1.5, 0.05))
+        hi         = max(opn, price) * hi_factor
+        lo         = max(min(opn, price) * lo_factor, 0.01)
+        vol        = int(avg_volume * max(0.5, np.random.normal(1.0, 0.2)))
         rows["Open"].append(round(opn, 2))
         rows["High"].append(round(hi, 2))
         rows["Low"].append(round(lo, 2))
@@ -231,64 +202,60 @@ def build_future_df(preds, last_date, avg_volume, volatility):
     df.index = df.index.strftime("%Y-%m-%d")
     return df
 
-
 def compute_metrics(actual, predicted):
-    actual = np.array(actual, dtype=float)
+    actual    = np.array(actual, dtype=float)
     predicted = np.array(predicted, dtype=float)
     n = min(len(actual), len(predicted))
     if n < 2:
         return 0.0, 0.0, 0.0
     actual, predicted = actual[:n], predicted[:n]
-    mae = float(np.mean(np.abs(actual - predicted)))
+    mae  = float(np.mean(np.abs(actual - predicted)))
     rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
-    da = float(
-        np.mean(np.sign(np.diff(actual)) == np.sign(np.diff(predicted))) * 100
-    )
+    da   = float(np.mean(np.sign(np.diff(actual)) == np.sign(np.diff(predicted))) * 100)
     return round(mae, 2), round(rmse, 2), round(da, 1)
-
 
 def df_to_records(df):
     records = []
     for date, row in df.iterrows():
         records.append({
-            "date": str(date) if not isinstance(date, str) else date,
-            "open": round(float(row["Open"]), 2),
-            "high": round(float(row["High"]), 2),
-            "low": round(float(row["Low"]), 2),
-            "close": round(float(row["Close"]), 2),
+            "date":   str(date) if not isinstance(date, str) else date,
+            "open":   round(float(row["Open"]), 2),
+            "high":   round(float(row["High"]), 2),
+            "low":    round(float(row["Low"]), 2),
+            "close":  round(float(row["Close"]), 2),
             "volume": int(row["Volume"]),
         })
     return records
 
-
-def run_single_model(tag, df_train, df_eval, df_full, window, avg_volume, volatility, last_date, results, accuracy, errors):
-    """Run one model in isolation — errors here don't kill other models."""
+def run_single_model(tag, df_train, df_eval, df_full, window,
+                     avg_volume, volatility, last_date, results, accuracy, errors):
+    """Run one model — isolated so one failure never kills the others."""
     try:
         random.seed(42); np.random.seed(42); torch.manual_seed(42)
 
-        # ── eval pass ──
+        # ── eval pass (measures accuracy against last 15 real days) ──
         X_e, y_e, sc_e = prepare_data(df_train, window)
         if tag == "RNN":
-            bw, bu = ga_optimize(df_train)
-            m_eval = train_model(SimpleRNN(1, bu), X_e, y_e)
+            bw, bu     = ga_optimize(df_train)
+            m_eval     = train_model(SimpleRNN(1, bu), X_e, y_e)
             preds_eval = forecast_future(m_eval, sc_e, df_train, bw, 15)
         elif tag == "LSTM":
-            m_eval = train_model(SimpleLSTM(1, 64), X_e, y_e)
+            m_eval     = train_model(SimpleLSTM(1, 64), X_e, y_e)
             preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
         else:
-            m_eval = train_model(SimpleGRU(1, 64), X_e, y_e)
+            m_eval     = train_model(SimpleGRU(1, 64), X_e, y_e)
             preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
 
         actual = df_eval["Close"].values[:len(preds_eval)]
         mae, rmse, da = compute_metrics(actual, preds_eval)
         accuracy[tag] = {"mae": mae, "rmse": rmse, "da": da}
 
-        # ── future pass ──
+        # ── future pass (predicts next 15 trading days) ──
         X_f, y_f, sc_f = prepare_data(df_full, window)
         if tag == "RNN":
             bw2, bu2 = ga_optimize(df_full)
-            m_fut = train_model(SimpleRNN(1, bu2), X_f, y_f)
-            preds = forecast_future(m_fut, sc_f, df_full, bw2)
+            m_fut    = train_model(SimpleRNN(1, bu2), X_f, y_f)
+            preds    = forecast_future(m_fut, sc_f, df_full, bw2)
         elif tag == "LSTM":
             m_fut = train_model(SimpleLSTM(1, 64), X_f, y_f)
             preds = forecast_future(m_fut, sc_f, df_full, window)
@@ -296,18 +263,16 @@ def run_single_model(tag, df_train, df_eval, df_full, window, avg_volume, volati
             m_fut = train_model(SimpleGRU(1, 64), X_f, y_f)
             preds = forecast_future(m_fut, sc_f, df_full, window)
 
-        df_fut = build_future_df(preds, last_date, avg_volume, volatility)
+        df_fut      = build_future_df(preds, last_date, avg_volume, volatility)
         results[tag] = df_to_records(df_fut)
 
     except Exception as e:
         errors[tag] = str(e)
 
-
 # ─── ROUTES ────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
-
 
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
@@ -318,12 +283,11 @@ def get_stocks():
         stocks = [{"symbol": s, "name": n} for s, n in rows]
     return jsonify(stocks)
 
-
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
-    data = request.json
+    data   = request.json
     symbol = data.get("symbol", "").upper().strip()
-    name = data.get("name", "").strip()
+    name   = data.get("name", "").strip()
     if not symbol or not name:
         return jsonify({"error": "Symbol and name required"}), 400
     try:
@@ -332,18 +296,15 @@ def add_stock():
     except Exception as e:
         return jsonify({"error": str(e)}), 409
 
-
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
     db_execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
     return jsonify({"success": True})
 
-
 @app.route("/api/stocks/all", methods=["DELETE"])
 def delete_all_stocks():
     db_execute("DELETE FROM companies")
     return jsonify({"success": True})
-
 
 @app.route("/api/view/<symbol>")
 def view_stock(symbol):
@@ -351,19 +312,18 @@ def view_stock(symbol):
         df = yf.download(symbol, period="3mo", auto_adjust=False, progress=False)
         if df.empty:
             return jsonify({"error": "No data found"}), 404
-        df = clean_ohlcv(df)
+        df      = clean_ohlcv(df)
         records = df_to_records(df.tail(60))
-        chg = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
-        pct = (chg / float(df["Close"].iloc[0])) * 100
+        chg     = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
+        pct     = (chg / float(df["Close"].iloc[0])) * 100
         return jsonify({
             "candles": records,
-            "trend": "up" if chg > 0 else ("down" if chg < 0 else "flat"),
-            "change": round(chg, 2),
+            "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
+            "change":  round(chg, 2),
             "percent": round(pct, 2),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/compare")
 def compare_stocks():
@@ -380,11 +340,11 @@ def compare_stocks():
             pct = (chg / float(df["Close"].iloc[0])) * 100
             return {
                 "candles": df_to_records(df.tail(20)),
-                "change": round(chg, 2),
+                "change":  round(chg, 2),
                 "percent": round(pct, 2),
-                "trend": "up" if chg > 0 else ("down" if chg < 0 else "flat"),
-                "high": round(float(df["High"].max()), 2),
-                "low": round(float(df["Low"].min()), 2),
+                "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
+                "high":    round(float(df["High"].max()), 2),
+                "low":     round(float(df["Low"].min()), 2),
                 "avg_vol": int(df["Volume"].mean()),
             }
 
@@ -392,137 +352,96 @@ def compare_stocks():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/api/predict/<symbol>")
 def predict_stock(symbol):
-    """
-    Streaming SSE endpoint — sends progress events so the frontend never
-    times out even on slow Render free-tier instances.
-    Each event is a JSON line: data: {...}\n\n
-    Final event has type 'done' with full results or 'error'.
-    """
     models_param = request.args.get("models", "RNN,LSTM,GRU").split(",")
-    models_param = [m.strip().upper() for m in models_param if m.strip().upper() in ("RNN", "LSTM", "GRU")]
+    models_param = [m.strip().upper() for m in models_param
+                    if m.strip().upper() in ("RNN", "LSTM", "GRU")]
     if not models_param:
         return jsonify({"error": "No valid models specified"}), 400
 
-    def generate():
-        def send(event_type, payload):
-            return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+    try:
+        df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
+        if df.empty:
+            return jsonify({"error": f"No data found for {symbol}. Check the ticker symbol."}), 404
+        if len(df) < 60:
+            return jsonify({"error": f"Not enough historical data for {symbol}."}), 400
 
-        yield send("progress", {"msg": "Downloading market data…", "pct": 5})
+        window     = 40
+        volatility = float(df["Close"].pct_change().dropna().std())
+        avg_volume = int(df["Volume"].mean())
+        last_date  = df.index[-1]
+        df_train   = df.iloc[:-15]
+        df_eval    = df.tail(15)
 
-        try:
-            df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
-            if df.empty:
-                yield send("error", {"msg": f"No data found for {symbol}. Check the ticker symbol."})
-                return
+        results  = {}
+        accuracy = {}
+        errors   = {}
 
-            if len(df) < 60:
-                yield send("error", {"msg": f"Not enough historical data for {symbol} (need 60+ days)."})
-                return
+        for tag in models_param:
+            run_single_model(
+                tag, df_train, df_eval, df, window,
+                avg_volume, volatility, last_date,
+                results, accuracy, errors
+            )
 
-            window = 40
-            volatility = float(df["Close"].pct_change().dropna().std())
-            avg_volume = int(df["Volume"].mean())
-            last_date = df.index[-1]
-            df_train = df.iloc[:-15]
-            df_eval = df.tail(15)
+        if not results:
+            all_errors = "; ".join(f"{t}: {e}" for t, e in errors.items())
+            return jsonify({"error": f"All models failed — {all_errors}"}), 500
 
-            yield send("progress", {"msg": "Data ready. Starting model training…", "pct": 10})
+        actual_candles = df_to_records(df.tail(20))
 
-            results = {}
-            accuracy = {}
-            errors = {}
+        votes = []
+        for tag, rows in results.items():
+            chg = rows[-1]["close"] - rows[0]["close"]
+            votes.append("UP" if chg > 0 else "DOWN")
 
-            pct_per_model = int(80 / len(models_param))
+        up = votes.count("UP")
+        dn = votes.count("DOWN")
+        n  = len(results)
+        if up == n:    consensus = "ALL_UP"
+        elif dn == n:  consensus = "ALL_DOWN"
+        elif up > dn:  consensus = "MAJORITY_UP"
+        elif dn > up:  consensus = "MAJORITY_DOWN"
+        else:          consensus = "SPLIT"
 
-            for i, tag in enumerate(models_param):
-                base_pct = 10 + i * pct_per_model
-                yield send("progress", {"msg": f"Training {tag}…", "pct": base_pct})
+        best = min(accuracy, key=lambda t: accuracy[t]["rmse"])
 
-                # Run model in same thread but with per-model exception isolation
-                run_single_model(
-                    tag, df_train, df_eval, df, window,
-                    avg_volume, volatility, last_date,
-                    results, accuracy, errors
-                )
+        return jsonify({
+            "actual":    actual_candles,
+            "predicted": results,
+            "accuracy":  accuracy,
+            "consensus": consensus,
+            "best":      best,
+            "skipped":   list(errors.keys()),
+        })
 
-                if tag in errors:
-                    yield send("progress", {"msg": f"{tag} failed: {errors[tag]} — skipping", "pct": base_pct + pct_per_model})
-                else:
-                    yield send("progress", {"msg": f"{tag} done ✓", "pct": base_pct + pct_per_model})
-
-            if not results:
-                all_errors = "; ".join(f"{t}: {e}" for t, e in errors.items())
-                yield send("error", {"msg": f"All models failed. Details: {all_errors}"})
-                return
-
-            yield send("progress", {"msg": "Computing consensus…", "pct": 93})
-
-            actual_candles = df_to_records(df.tail(20))
-
-            votes = []
-            for tag, rows in results.items():
-                chg = rows[-1]["close"] - rows[0]["close"]
-                votes.append("UP" if chg > 0 else "DOWN")
-
-            up = votes.count("UP")
-            dn = votes.count("DOWN")
-            n = len(results)
-            if up == n:       consensus = "ALL_UP"
-            elif dn == n:     consensus = "ALL_DOWN"
-            elif up > dn:     consensus = "MAJORITY_UP"
-            elif dn > up:     consensus = "MAJORITY_DOWN"
-            else:             consensus = "SPLIT"
-
-            best = min(accuracy, key=lambda t: accuracy[t]["rmse"])
-
-            yield send("done", {
-                "actual": actual_candles,
-                "predicted": results,
-                "accuracy": accuracy,
-                "consensus": consensus,
-                "best": best,
-                "skipped": list(errors.keys()),
-            })
-
-        except Exception as e:
-            yield send("error", {"msg": str(e)})
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # disable nginx buffering on Render
-        },
-    )
-
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/news/<symbol>")
 def get_news(symbol):
     try:
-        tkr = yf.Ticker(symbol)
+        tkr      = yf.Ticker(symbol)
         raw_news = tkr.news
-        cleaned = []
+        cleaned  = []
         for n in raw_news[:5]:
             if "content" in n:
-                c = n["content"]
-                title = c.get("title", "")
-                link = c.get("clickThroughUrl", {}).get("url", "")
+                c       = n["content"]
+                title   = c.get("title", "")
+                link    = c.get("clickThroughUrl", {}).get("url", "")
                 summary = c.get("summary", "")
-                pub = c.get("pubDate", "")
+                pub     = c.get("pubDate", "")
             else:
-                title = n.get("title", "")
-                link = n.get("link", "")
+                title   = n.get("title", "")
+                link    = n.get("link", "")
                 summary = n.get("summary", "")
-                pub = n.get("providerPublishTime", "")
-            cleaned.append({"title": title, "link": link, "summary": summary, "pubDate": str(pub)})
+                pub     = n.get("providerPublishTime", "")
+            cleaned.append({"title": title, "link": link,
+                            "summary": summary, "pubDate": str(pub)})
         return jsonify(cleaned)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
