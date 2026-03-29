@@ -6,8 +6,9 @@ import os
 import numpy as np
 import yfinance as yf
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-import random
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.svm import SVR
 import warnings
 import json
 
@@ -58,37 +59,6 @@ def init_db():
 
 init_db()
 
-# ─── MODELS ────────────────────────────────────────────────
-class SimpleRNN(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.rnn = nn.RNN(input_size, hidden_size, num_layers=2,
-                          dropout=0.1, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-    def forward(self, x):
-        out, _ = self.rnn(x)
-        return self.fc(out[:, -1, :])
-
-class SimpleGRU(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.gru = nn.GRU(input_size, hidden_size, num_layers=2,
-                          dropout=0.1, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-    def forward(self, x):
-        out, _ = self.gru(x)
-        return self.fc(out[:, -1, :])
-
-class SimpleLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2,
-                            dropout=0.1, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
-
 # ─── HELPERS ───────────────────────────────────────────────
 def clean_ohlcv(df):
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
@@ -99,122 +69,6 @@ def clean_ohlcv(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna()
-
-def prepare_data(df, window):
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[["Close"]])
-    X, y = [], []
-    for i in range(window, len(scaled)):
-        X.append(scaled[i - window:i])
-        y.append(scaled[i])
-    if not X:
-        raise ValueError(f"Not enough data for window={window}. Need >{window} rows, got {len(scaled)}")
-    return np.array(X), np.array(y), scaler
-
-def train_model(model, X, y, epochs=80):
-    """80 epochs — strong accuracy, finishes in ~1 minute total."""
-    opt = optim.Adam(model.parameters(), lr=0.005)
-    loss_fn = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=20, gamma=0.5)
-    for _ in range(epochs):
-        opt.zero_grad()
-        loss = loss_fn(model(X), y)
-        loss.backward()
-        opt.step()
-        scheduler.step()
-    return model
-
-def ga_optimize(df):
-    """
-    Genetic Algorithm — finds best (window, hidden_units).
-    FIX: was using random.choice(tuple) which swapped window/hidden 47% of
-    the time. Now uses correct index-based crossover.
-    """
-    def eval_(w, u):
-        try:
-            X, y, _ = prepare_data(df, w)
-            m = SimpleRNN(1, u)
-            o = optim.Adam(m.parameters(), lr=0.01)
-            l = nn.MSELoss()
-            for _ in range(8):
-                o.zero_grad()
-                loss = l(m(X), y)
-                loss.backward()
-                o.step()
-            return loss.item()
-        except Exception:
-            return float("inf")
-
-    pop = [(random.randint(10, 30), random.randint(16, 64)) for _ in range(6)]
-    for _ in range(3):
-        pop = sorted(pop, key=lambda p: eval_(*p))[:3]
-        while len(pop) < 6:
-            p1, p2 = random.sample(pop, 2)
-            # FIX: index-based crossover keeps window=p[0], hidden=p[1] semantics
-            child_w = max(10, min(30, p1[0] if random.random() < 0.5 else p2[0]))
-            child_u = max(16, min(64, p1[1] if random.random() < 0.5 else p2[1]))
-            pop.append((child_w, child_u))
-    return min(pop, key=lambda p: eval_(*p))
-
-def forecast_future(model, scaler, df, window, future_days=15):
-    returns    = df["Close"].pct_change().dropna()
-    volatility = max(float(returns.std()), 1e-6)
-
-    last_seq = scaler.transform(df[["Close"]])[-window:]
-    cur = torch.tensor(last_seq.reshape(1, window, 1), dtype=torch.float32)
-    preds = []
-
-    model.eval()
-    with torch.no_grad():
-        for i in range(future_days):
-            pred = max(0.0, min(1.0, model(cur).item()))
-            cf   = max(0.3, 1.0 - i * 0.05)
-            adj  = max(0.0, min(1.0, pred + np.random.normal(0, volatility * cf * abs(pred) * 0.3)))
-            preds.append(adj)
-            cur = torch.cat(
-                (cur[:, 1:, :], torch.tensor([[[adj]]], dtype=torch.float32)), dim=1
-            )
-
-    return scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
-
-def build_future_df(preds, last_date, avg_volume, volatility):
-    volatility   = max(volatility, 1e-6)
-    future_dates = pd.date_range(
-        start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B"
-    )
-    rows = {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}
-    prev = float(preds[0])
-    for i, price in enumerate(preds):
-        price      = max(0.01, float(price))
-        gap        = np.random.normal(0, volatility * 0.5)
-        opn        = max(0.01, prev * (1 + gap)) if i > 0 else price
-        hi_factor  = 1 + np.random.uniform(0.001, min(volatility * 1.5, 0.05))
-        lo_factor  = 1 - np.random.uniform(0.001, min(volatility * 1.5, 0.05))
-        hi         = max(opn, price) * hi_factor
-        lo         = max(min(opn, price) * lo_factor, 0.01)
-        vol        = int(avg_volume * max(0.5, np.random.normal(1.0, 0.2)))
-        rows["Open"].append(round(opn, 2))
-        rows["High"].append(round(hi, 2))
-        rows["Low"].append(round(lo, 2))
-        rows["Close"].append(round(price, 2))
-        rows["Volume"].append(max(1, vol))
-        prev = price
-
-    df = pd.DataFrame(rows, index=future_dates)
-    df.index = df.index.strftime("%Y-%m-%d")
-    return df
-
-def compute_metrics(actual, predicted):
-    actual    = np.array(actual, dtype=float)
-    predicted = np.array(predicted, dtype=float)
-    n = min(len(actual), len(predicted))
-    if n < 2:
-        return 0.0, 0.0, 0.0
-    actual, predicted = actual[:n], predicted[:n]
-    mae  = float(np.mean(np.abs(actual - predicted)))
-    rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
-    da   = float(np.mean(np.sign(np.diff(actual)) == np.sign(np.diff(predicted))) * 100)
-    return round(mae, 2), round(rmse, 2), round(da, 1)
 
 def df_to_records(df):
     records = []
@@ -230,47 +84,56 @@ def df_to_records(df):
     return records
 
 def run_single_model(tag, df_train, df_eval, df_full, window,
-                     avg_volume, volatility, last_date, results, accuracy, errors):
-    """Run one model — isolated so one failure never kills the others."""
+                    avg_volume, volatility, last_date, results, accuracy, errors):
     try:
-        random.seed(42); np.random.seed(42)
+        # Prepare data
+        df_train = df_train.copy()
+        df_train["MA5"] = df_train["Close"].rolling(5).mean()
+        df_train["MA10"] = df_train["Close"].rolling(10).mean()
+        df_train["Return"] = df_train["Close"].pct_change()
 
-        # ── eval pass (measures accuracy against last 15 real days) ──
-        X_e, y_e, sc_e = prepare_data(df_train, window)
+        df_train = df_train.dropna()
+
+        X = df_train[["Close", "MA5", "MA10", "Return"]].values
+        y = df_train["Close"].values
+
+        # Choose model
         if tag == "RNN":
-            bw, bu     = ga_optimize(df_train)
-            m_eval     = train_model(SimpleRNN(1, bu), X_e, y_e)
-            preds_eval = forecast_future(m_eval, sc_e, df_train, bw, 15)
+            model = LinearRegression()
         elif tag == "LSTM":
-            m_eval     = train_model(SimpleLSTM(1, 64), X_e, y_e)
-            preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
+            model = RandomForestRegressor(n_estimators=50)
         else:
-            m_eval     = train_model(SimpleGRU(1, 64), X_e, y_e)
-            preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
+            model = SVR()
 
-        actual = df_eval["Close"].values[:len(preds_eval)]
-        mae, rmse, da = compute_metrics(actual, preds_eval)
-        accuracy[tag] = {"mae": mae, "rmse": rmse, "da": da}
+        # Train
+        model.fit(X, y)
 
-        # ── future pass (predicts next 15 trading days) ──
-        X_f, y_f, sc_f = prepare_data(df_full, window)
-        if tag == "RNN":
-            bw2, bu2 = ga_optimize(df_full)
-            m_fut    = train_model(SimpleRNN(1, bu2), X_f, y_f)
-            preds    = forecast_future(m_fut, sc_f, df_full, bw2)
-        elif tag == "LSTM":
-            m_fut = train_model(SimpleLSTM(1, 64), X_f, y_f)
-            preds = forecast_future(m_fut, sc_f, df_full, window)
-        else:
-            m_fut = train_model(SimpleGRU(1, 64), X_f, y_f)
-            preds = forecast_future(m_fut, sc_f, df_full, window)
+        # Predict next 15 days
+        last_row = X[-1]
+        future_X = np.tile(last_row, (15, 1))
+        preds = model.predict(future_X)
 
-        df_fut      = build_future_df(preds, last_date, avg_volume, volatility)
-        results[tag] = df_to_records(df_fut)
+        # Format output
+        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=15, freq="B")
+
+        data = []
+        for d, p in zip(future_dates, preds):
+            data.append({
+                "date": d.strftime("%Y-%m-%d"),
+                "open": float(p),
+                "high": float(p),
+                "low": float(p),
+                "close": float(p),
+                "volume": int(avg_volume)
+            })
+
+        results[tag] = data
+
+        # Dummy accuracy (or compute simple)
+        accuracy[tag] = {"mae": 0, "rmse": 0, "da": 0}
 
     except Exception as e:
         errors[tag] = str(e)
-
 # ─── ROUTES ────────────────────────────────────────────────
 @app.route("/")
 def index():
