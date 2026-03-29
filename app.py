@@ -58,7 +58,8 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    init_db()
+
+init_db()
 
 # ─── MODELS ────────────────────────────────────────────────
 class SimpleRNN(nn.Module):
@@ -455,6 +456,6 @@ def get_news(symbol):
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    if DATABASE_URL:
-        init_db()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

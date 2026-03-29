@@ -1,9 +1,10 @@
 flask
 flask-cors
-psycopg2-binary
-gunicorn
-torch
 numpy
 pandas
-yfinance
 scikit-learn
+yfinance
+requests
+beautifulsoup4
+psycopg2-binary
+gunicorn
