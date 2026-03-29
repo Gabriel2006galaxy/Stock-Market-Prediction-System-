@@ -229,7 +229,7 @@ async function runPrediction() {
     show("pred-loader"); hide("pred-result");
     document.getElementById("pred-btn").disabled = true;
 
-    const fill = document.getElementById("pred-progress");
+    const fill   = document.getElementById("pred-progress");
     const status = document.getElementById("pred-status");
     fill.style.width = "0%";
 
@@ -242,51 +242,44 @@ async function runPrediction() {
     ];
     let pct = 0, msgIdx = 0;
     const progInterval = setInterval(() => {
-        pct = Math.min(pct + Math.random() * 3, 95);
+        pct = Math.min(pct + Math.random() * 2.5, 90);
         fill.style.width = pct + "%";
         if (pct > msgIdx * 20 && msgIdx < messages.length) {
             status.textContent = messages[msgIdx++];
         }
-    }, 600);
+    }, 800);
 
     try {
-        console.log(`🚀 Predicting ${symbol} with models:`, selected);
-        const res = await fetch(`/api/predict/${symbol}?models=${selected.join(",")}`);
-        console.log("📡 API Status:", res.status);
-        
+        const res  = await fetch(`/api/predict/${symbol}?models=${selected.join(",")}`);
         const data = await res.json();
-        console.log("🔍 FULL RESPONSE:", data);
 
         clearInterval(progInterval);
         fill.style.width = "100%";
-        setTimeout(() => hide("pred-loader"), 500);
+        hide("pred-loader");
         document.getElementById("pred-btn").disabled = false;
 
         if (data.error) {
-            console.error("❌ API ERROR:", data.error);
             toast("❌ " + data.error, false);
             status.textContent = data.error;
             return;
         }
 
         if (data.skipped && data.skipped.length) {
-            toast(`⚠ ${data.skipped.join(", ")} skipped`, false);
+            toast(`⚠ ${data.skipped.join(", ")} skipped due to errors`, false);
         }
 
         show("pred-result");
-        window.lastPredictionData = data;
+        window.lastPredictionData     = data;
         window.lastPredictionSelected = selected.filter(t => data.predicted[t]);
-        console.log("🎉 Rendering predictions for:", window.lastPredictionSelected);
         renderPrediction(data, window.lastPredictionSelected, symbol);
         fetchNews(symbol, "pred-news");
 
     } catch (e) {
-        console.error("💥 Network error:", e);
         clearInterval(progInterval);
         hide("pred-loader");
         document.getElementById("pred-btn").disabled = false;
         fill.style.width = "0%";
-        toast("❌ Connection failed: " + e.message, false);
+        toast("❌ " + e.message, false);
     }
 }
 
