@@ -1,13 +1,7 @@
-import os
-import json
-import traceback
-from pathlib import Path
-from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
-import mysql.connector
 import psycopg2
-import psycopg2.extras
+from psycopg2.extras import RealDictCursor
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,572 +9,477 @@ import numpy as np
 import yfinance as yf
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
+import random
 import warnings
+import json
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 warnings.filterwarnings("ignore")
 
 app = Flask(__name__)
+CORS(app)
 
-cors_origins = os.getenv("CORS_ORIGINS", "*")
-CORS(app, origins=cors_origins)
+# ─── DB CONNECTION (POSTGRESQL) ────────────────────────────────
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# config
-MODEL_EPOCHS_DEFAULT = int(os.getenv("MODEL_EPOCHS", "20"))
-MODEL_EPOCHS_MAX = 50
-MODEL_REFRESH_HOURS = int(os.getenv("MODEL_REFRESH_HOURS", "24"))
-
-# ✅ FIXED: Render-safe temp storage
-MODEL_DIR = Path(os.getenv("MODEL_DIR", "/tmp/models"))
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASS", ""),
-    "database": os.getenv("DB_NAME", "stocks")
-}
-
-STOCKS_FILE = Path(os.getenv("STOCKS_FILE", "stocks.json"))
-
-POSTGRES_URL = os.getenv("DATABASE_URL")
-if not POSTGRES_URL:
-    POSTGRES_URL = os.getenv("RENDER_DATABASE_URL")  # fallback env name in Render
-
-# DB connection: Postgres is required for persistence; local stores are only fallback in unconfigured situations.
 def get_db():
-    if not POSTGRES_URL:
-        return None
     try:
-        conn = psycopg2.connect(POSTGRES_URL, cursor_factory=psycopg2.extras.RealDictCursor, connect_timeout=5)
+        if DATABASE_URL:
+            # Render PostgreSQL connection
+            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        else:
+            # Local fallback (you can adjust this for local testing)
+            conn = psycopg2.connect(
+                host="localhost",
+                user="postgres",
+                password="your_password",
+                database="stocks"
+            )
         return conn
     except Exception as e:
-        app.logger.error(f"Failed to connect to Postgres: {e}")
+        print(f"Database connection error: {e}")
         return None
-
 
 def init_db():
     conn = get_db()
-    if not conn:
-        app.logger.warning("Postgres DATABASE_URL is not set; database persistence is unavailable.")
-        return False
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS companies (
-                symbol VARCHAR(20) PRIMARY KEY,
-                name VARCHAR(255) NOT NULL
-            )
-        """)
-        conn.commit()
-        return True
-    except Exception as e:
-        app.logger.error(f"Failed to initialize database: {e}")
-        return False
-    finally:
-        conn.close()
-
-
-def read_stock_file():
-    if not STOCKS_FILE.exists():
-        return []
-    try:
-        with STOCKS_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data
-    except Exception:
-        pass
-    return []
-
-
-def write_stock_file(items):
-    try:
-        STOCKS_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def get_all_stocks():
-    conn = get_db()
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute("CREATE TABLE IF NOT EXISTS companies (symbol VARCHAR(20) PRIMARY KEY, name VARCHAR(255))")
-            cursor.execute("SELECT symbol, name FROM companies")
-            return [{"symbol": s, "name": n} for s, n in cursor.fetchall()]
-        except Exception:
-            return []
-        finally:
-            conn.close()
-
-    return read_stock_file()
-
-
-def persist_stock(symbol, name):
-    conn = get_db()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE IF NOT EXISTS companies (symbol VARCHAR(20) PRIMARY KEY, name VARCHAR(255))")
-            cursor.execute("INSERT INTO companies (symbol,name) VALUES(%s,%s)", (symbol, name))
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS companies (
+                    symbol VARCHAR(20) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL
+                )
+            """)
             conn.commit()
-            return True
-        except psycopg2.errors.UniqueViolation:
-            # already exists
-            return False
+            print("Database initialized successfully.")
         except Exception as e:
-            app.logger.error(f"persist_stock DB error: {e}")
-            return False
+            print(f"Error initializing database: {e}")
         finally:
             conn.close()
 
-    app.logger.warning("No DB connection available, using fallback file storage")
-    stocks = read_stock_file()
-    if any(s["symbol"] == symbol for s in stocks):
-        return False
-    stocks.append({"symbol": symbol, "name": name})
-    write_stock_file(stocks)
-    return True
+init_db()
 
-
-def remove_stock(symbol):
-    conn = get_db()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM companies WHERE symbol=%s", (symbol,))
-            conn.commit()
-            return True
-        except Exception as e:
-            app.logger.error(f"remove_stock DB error: {e}")
-            return False
-        finally:
-            conn.close()
-
-    app.logger.warning("No DB connection available, using fallback file storage")
-    stocks = read_stock_file()
-    stocks = [s for s in stocks if s.get("symbol") != symbol]
-    write_stock_file(stocks)
-    return True
-
-
-def remove_all_stocks():
-    conn = get_db()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE IF NOT EXISTS companies (symbol VARCHAR(20) PRIMARY KEY, name VARCHAR(255))")
-            cursor.execute("DELETE FROM companies")
-            conn.commit()
-            return True
-        except Exception as e:
-            app.logger.error(f"remove_all_stocks DB error: {e}")
-            return False
-        finally:
-            conn.close()
-
-    app.logger.warning("No DB connection available, using fallback file storage")
-    write_stock_file([])
-    return True
-
-
-def model_file_path(symbol, tag):
-    clean_symbol = "".join([c for c in symbol.upper() if c.isalnum() or c == "_"])
-    return MODEL_DIR / f"{clean_symbol}_{tag}.pt"
-
-
-def model_needs_refresh(path):
-    if not path.exists():
-        return True
-    age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
-    return age > timedelta(hours=MODEL_REFRESH_HOURS)
-
-
-# ─── MODELS ─────────────────────────────────────────────
-
+# ─── MODELS ──────────────────────────────────────────────────
 class SimpleRNN(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.rnn = nn.RNN(input_size, hidden_size, num_layers=2, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers=2, dropout=0.1, batch_first=True)
+        self.fc  = nn.Linear(hidden_size, 1)
     def forward(self, x):
         out, _ = self.rnn(x)
         return self.fc(out[:, -1, :])
 
-
 class SimpleGRU(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.gru = nn.GRU(input_size, hidden_size, num_layers=2, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-
+        self.gru = nn.GRU(input_size, hidden_size, num_layers=2, dropout=0.1, batch_first=True)
+        self.fc  = nn.Linear(hidden_size, 1)
     def forward(self, x):
         out, _ = self.gru(x)
         return self.fc(out[:, -1, :])
 
-
 class SimpleLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, dropout=0.1, batch_first=True)
+        self.fc   = nn.Linear(hidden_size, 1)
     def forward(self, x):
         out, _ = self.lstm(x)
         return self.fc(out[:, -1, :])
 
-
-# ─── HELPERS ─────────────────────────────────────────────
-
+# ─── HELPERS ─────────────────────────────────────────────────
 def clean_ohlcv(df):
-    if df is None or df.empty:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
-
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
+    for col in ["Open","High","Low","Close","Adj Close","Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
     return df.dropna()
 
-
 def prepare_data(df, window):
-    features = ['Open', 'High', 'Low', 'Close', 'Volume']
-
+    if len(df) <= window:
+        raise ValueError(f"Insufficient data for window size {window}")
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[features])
-
-    X, y = [], []
+    scaled = scaler.fit_transform(df[['Close']])
+    X, y   = [], []
     for i in range(window, len(scaled)):
         X.append(scaled[i-window:i])
-        y.append(scaled[i][3])
+        y.append(scaled[i])
+    return (torch.tensor(X, dtype=torch.float32),
+            torch.tensor(y, dtype=torch.float32),
+            scaler)
 
-    return (
-        torch.tensor(X, dtype=torch.float32),
-        torch.tensor(y, dtype=torch.float32).view(-1, 1),
-        scaler
-    )
-
-
-def train_model(model, X, y, epochs=50):
-    opt = optim.Adam(model.parameters(), lr=0.003)
+def train_model(model, X, y, epochs=100):
+    opt     = optim.Adam(model.parameters(), lr=0.005)
     loss_fn = nn.MSELoss()
-
+    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=20, gamma=0.5)
     for _ in range(epochs):
         opt.zero_grad()
         loss = loss_fn(model(X), y)
         loss.backward()
         opt.step()
-
+        scheduler.step()
     return model
 
+def ga_optimize(df, window=20):
+    def eval_(w, u):
+        try:
+            X, y, _ = prepare_data(df, w)
+            m = SimpleRNN(1, u)
+            o = optim.Adam(m.parameters(), lr=0.01)
+            l = nn.MSELoss()
+            for _ in range(5): # Fewer epochs for GA speed
+                o.zero_grad()
+                loss = l(m(X), y)
+                loss.backward()
+                o.step()
+            return loss.item()
+        except:
+            return float('inf')
+
+    pop = [(random.randint(5, 20), random.randint(5, 50)) for _ in range(10)]
+    for _ in range(3):
+        pop = sorted(pop, key=lambda p: eval_(*p))[:5]
+        while len(pop) < 10:
+            if len(pop) < 2: break
+            p1, p2 = random.sample(pop, 2)
+            pop.append((random.choice(p1), random.choice(p2)))
+    return min(pop, key=lambda p: eval_(*p))
 
 def forecast_future(model, scaler, df, window, future_days=15):
-    features = ['Open', 'High', 'Low', 'Close', 'Volume']
-
-    last_seq = scaler.transform(df[features])[-window:]
-    cur = torch.tensor(last_seq.reshape(1, window, 5), dtype=torch.float32)
-
-    preds = []
+    returns    = df['Close'].pct_change().dropna()
+    volatility = returns.std() if not returns.empty else 0.02
+  
+    last_seq = scaler.transform(df[['Close']])[-window:]
+    cur      = torch.tensor(last_seq.reshape(1, window, 1), dtype=torch.float32)
+    preds    = []
 
     model.eval()
     with torch.no_grad():
-        for _ in range(future_days):
+        for i in range(future_days):
             pred = model(cur).item()
-            preds.append(pred)
+            cf   = max(0.3, 1.0 - i * 0.05)
+            adj  = pred + np.random.normal(0, volatility * cf * pred * 0.3)
+            preds.append(adj)
+            cur  = torch.cat(
+                (cur[:, 1:, :],
+                 torch.tensor([[[adj]]], dtype=torch.float32)), dim=1)
 
-            new_row = cur[:, -1, :].clone()
-            new_row[0][3] = pred
+    return scaler.inverse_transform(np.array(preds).reshape(-1,1)).flatten()
 
-            cur = torch.cat((cur[:, 1:, :], new_row.unsqueeze(0)), dim=1)
-
-    preds = np.array(preds).reshape(-1, 1)
-
-    dummy = np.zeros((len(preds), 5))
-    dummy[:, 3] = preds[:, 0]
-
-    return scaler.inverse_transform(dummy)[:, 3]
-
-
-def build_future_df(preds, last_date):
-    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1),
-                                 periods=len(preds), freq='B')
-
-    rows = {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}
-
+def build_future_df(preds, last_date, avg_volume, volatility):
+    future_dates = pd.date_range(
+        start=last_date + pd.Timedelta(days=1),
+        periods=len(preds), freq='B')
+    rows = {"Open":[],"High":[],"Low":[],"Close":[],"Volume":[]}
     prev = float(preds[0])
-
-    for price in preds:
+    for i, price in enumerate(preds):
         price = float(price)
-
-        opn = prev
-        hi = max(opn, price) * 1.01
-        lo = min(opn, price) * 0.99
-        vol = 100000
-
-        rows["Open"].append(round(opn, 2))
-        rows["High"].append(round(hi, 2))
-        rows["Low"].append(round(lo, 2))
-        rows["Close"].append(round(price, 2))
+        gap   = np.random.normal(0, volatility * 0.5)
+        opn   = prev * (1 + gap) if i > 0 else prev
+        hi    = max(opn, price) * (1 + np.random.uniform(0.001, volatility * 1.5))
+        lo    = min(opn, price) * (1 - np.random.uniform(0.001, volatility * 1.5))
+        vol   = int(avg_volume * max(0.5, np.random.normal(1.0, 0.2)))
+        rows["Open"].append(round(opn,2))
+        rows["High"].append(round(hi,2))
+        rows["Low"].append(round(lo,2))
+        rows["Close"].append(round(price,2))
         rows["Volume"].append(vol)
-
         prev = price
-
     df = pd.DataFrame(rows, index=future_dates)
     df.index = df.index.strftime("%Y-%m-%d")
-
     return df
 
-
 def compute_metrics(actual, predicted):
-    actual = np.array(actual)
-    predicted = np.array(predicted[:len(actual)])
-
-    mae = float(np.mean(np.abs(actual - predicted)))
-    rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
-
-    return round(mae, 2), round(rmse, 2)
-
+    actual    = np.array(actual)
+    predicted = np.array(predicted)
+    # Ensure same length
+    min_len = min(len(actual), len(predicted))
+    actual = actual[:min_len]
+    predicted = predicted[:min_len]
+    
+    mae  = float(np.mean(np.abs(actual - predicted)))
+    rmse = float(np.sqrt(np.mean((actual - predicted)**2)))
+    
+    # Directional accuracy
+    if min_len > 1:
+        da = float(np.mean(np.sign(np.diff(actual)) == np.sign(np.diff(predicted))) * 100)
+    else:
+        da = 0.0
+    return round(mae,2), round(rmse,2), round(da,1)
 
 def df_to_records(df):
     records = []
     for date, row in df.iterrows():
         records.append({
-            "date": str(date),
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
+            "date":   str(date) if not isinstance(date, str) else date,
+            "open":   round(float(row["Open"]),2),
+            "high":   round(float(row["High"]),2),
+            "low":    round(float(row["Low"]),2),
+            "close":  round(float(row["Close"]),2),
             "volume": int(row["Volume"])
         })
     return records
 
-
-# ─── ROUTES ─────────────────────────────────────────────
-
+# ─── ROUTES ──────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
-@app.route("/api/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "time": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "models_cached": len(list(MODEL_DIR.glob("*.pt")))
-    })
-
-
-# ✅ FIXED DB ROUTES
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
-    stocks = get_all_stocks()
-    return jsonify(stocks)
-
-
-@app.route("/api/validate/<symbol>")
-def validate_stock(symbol):
-    """Check if a stock symbol is valid by trying to fetch data from yfinance."""
+    conn   = get_db()
+    if not conn: return jsonify({"error": "Database connection failed"}), 500
     try:
-        symbol_clean = symbol.upper().strip()
-        # Try to fetch 1 day of data; if it fails, symbol is invalid
-        df = yf.download(symbol_clean, period="1d", progress=False, threads=False)
-        if df is None or df.empty:
-            return jsonify({"valid": False, "error": f"No market data found for {symbol_clean}"}), 400
-        return jsonify({"valid": True, "symbol": symbol_clean})
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT symbol, name FROM companies ORDER BY symbol ASC")
+        stocks = cursor.fetchall()
+        return jsonify(stocks)
     except Exception as e:
-        return jsonify({"valid": False, "error": f"Invalid ticker: {str(e)[:100]}"}), 400
-
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
-    data = request.json or {}
-    symbol = data.get("symbol", "").upper().strip()
-    name = data.get("name", "").strip()
-
+    data   = request.json
+    symbol = data.get("symbol","").upper().strip()
+    name   = data.get("name","").strip()
     if not symbol or not name:
-        return jsonify({"error": "⚠️ Symbol and name are required"}), 400
-
-    # Validate ticker exists in market
+        return jsonify({"error": "Symbol and name required"}), 400
+    
+    conn = get_db()
+    if not conn: return jsonify({"error": "Database connection failed"}), 500
     try:
-        df = yf.download(symbol, period="1d", progress=False, threads=False)
-        if df is None or df.empty:
-            return jsonify({"error": f"❌ No market data found for {symbol}. Check ticker spelling."}), 400
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO companies (symbol, name) VALUES(%s,%s) ON CONFLICT (symbol) DO UPDATE SET name = EXCLUDED.name", (symbol, name))
+        conn.commit()
+        return jsonify({"success": True, "symbol": symbol, "name": name})
     except Exception as e:
-        return jsonify({"error": f"❌ Invalid ticker symbol: {symbol}. Please verify on Yahoo Finance."}), 400
-
-    if not persist_stock(symbol, name):
-        return jsonify({"error": "⚠️ Stock already in watchlist"}), 409
-
-    return jsonify({"success": True, "symbol": symbol, "name": name})
-
+        return jsonify({"error": str(e)}), 409
+    finally:
+        conn.close()
 
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
-    cleaned = symbol.upper().strip()
-    if not cleaned:
-        return jsonify({"error": "symbol is required"}), 400
-
-    if not remove_stock(cleaned):
-        return jsonify({"error": "Failed to delete"}), 500
-
-    return jsonify({"success": True})
-
+    conn = get_db()
+    if not conn: return jsonify({"error": "Database connection failed"}), 500
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
 @app.route("/api/stocks/all", methods=["DELETE"])
 def delete_all_stocks():
-    if not remove_all_stocks():
-        return jsonify({"error": "Failed to delete all"}), 500
-    return jsonify({"success": True})
-
-
-def get_stock_market_data(symbol, period="3mo"):
-    df = clean_ohlcv(yf.download(symbol, period=period, interval='1d', progress=False, threads=False))
-    if df.empty:
-        return None
-
-    o = float(df['Open'][0])
-    c = float(df['Close'][-1])
-    change = round(c - o, 2)
-    percent = round((c - o) / o * 100, 2) if o else 0
-    trend = 'up' if change >= 0 else 'down'
-
-    return {
-        'symbol': symbol.upper(),
-        'candles': df_to_records(df),
-        'change': change,
-        'percent': percent,
-        'trend': trend,
-        'high': round(float(df['High'].max()), 2),
-        'low': round(float(df['Low'].min()), 2),
-        'avg_vol': int(df['Volume'].mean())
-    }
-
-
-@app.route('/api/view/<symbol>')
-def view_stock(symbol):
-    data = get_stock_market_data(symbol, period='3mo')
-    if not data:
-        return jsonify({'error': 'No market data'}), 404
-
-    # prefer user-friendly name from watchlist
-    all_stocks = get_all_stocks()
-    stock = next((s for s in all_stocks if s.get('symbol') == symbol.upper()), None)
-    data['name'] = stock.get('name') if stock else symbol.upper()
-
-    return jsonify(data)
-
-
-@app.route('/api/compare')
-def compare_stocks():
-    s1 = request.args.get('s1', '').upper().strip()
-    s2 = request.args.get('s2', '').upper().strip()
-    if not s1 or not s2:
-        return jsonify({'error': 'Two symbols required'}), 400
-
-    d1 = get_stock_market_data(s1, period='3mo')
-    d2 = get_stock_market_data(s2, period='3mo')
-    if not d1 or not d2:
-        return jsonify({'error': 'Failed to load one of the symbols'}), 404
-
-    return jsonify({'stock1': d1, 'stock2': d2})
-
-
-@app.route('/api/news/<symbol>')
-def stock_news(symbol):
+    conn = get_db()
+    if not conn: return jsonify({"error": "Database connection failed"}), 500
     try:
-        ticker = yf.Ticker(symbol)
-        raw = None
-
-        if hasattr(ticker, 'news'):
-            raw = ticker.news
-
-        news_list = []
-        if isinstance(raw, list):
-            news_list = raw
-        elif isinstance(raw, dict) and raw.get('news') is not None:
-            candidate = raw.get('news')
-            if isinstance(candidate, list):
-                news_list = candidate
-
-        # yfinance may give an empty list for some symbols; no hard failure
-        if not news_list:
-            return jsonify({'news': [], 'error': f'No recent news found for {symbol}'})
-
-        out = []
-        for item in news_list[:15]:
-            out.append({
-                'title': item.get('title', 'No title'),
-                'link': item.get('link', ''),
-                'summary': item.get('summary', item.get('publisher', 'No summary available')),
-                'pubDate': item.get('providerPublishTime', item.get('pubDate', None))
-            })
-
-        return jsonify({'news': out})
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM companies")
+        conn.commit()
+        return jsonify({"success": True})
     except Exception as e:
-        app.logger.error(f"news fetch failed for {symbol}: {e}")
-        return jsonify({'news': [], 'error': f'Failed to fetch news for {symbol}'}), 500
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
+@app.route("/api/view/<symbol>")
+def view_stock(symbol):
+    try:
+        df = yf.download(symbol, period="6mo", auto_adjust=False, progress=False)
+        if df.empty:
+            return jsonify({"error": f"No data found for {symbol}"}), 404
+        df      = clean_ohlcv(df)
+        records = df_to_records(df.tail(60))
+        if len(df) < 2:
+            return jsonify({"error": "Insufficient historical data"}), 400
+            
+        chg     = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[-2])
+        pct     = (chg / float(df["Close"].iloc[-2])) * 100
+        return jsonify({
+            "candles": records,
+            "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
+            "change":  round(chg, 2),
+            "percent": round(pct, 2)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/compare")
+def compare_stocks():
+    s1 = request.args.get("s1","")
+    s2 = request.args.get("s2","")
+    try:
+        d1 = clean_ohlcv(yf.download(s1, period="1mo", auto_adjust=False, progress=False))
+        d2 = clean_ohlcv(yf.download(s2, period="1mo", auto_adjust=False, progress=False))
+        if d1.empty or d2.empty:
+            return jsonify({"error": "No data found for one or both symbols"}), 404
+
+        def stats(df):
+            if len(df) < 2: return None
+            chg = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[-2])
+            pct = (chg / float(df["Close"].iloc[-2])) * 100
+            return {
+                "candles": df_to_records(df.tail(20)),
+                "change":  round(chg,2),
+                "percent": round(pct,2),
+                "trend":   "up" if chg>0 else ("down" if chg<0 else "flat"),
+                "high":    round(float(df["High"].max()),2),
+                "low":     round(float(df["Low"].min()),2),
+                "avg_vol": int(df["Volume"].mean())
+            }
+        
+        st1, st2 = stats(d1), stats(d2)
+        if not st1 or not st2:
+             return jsonify({"error": "Insufficient data for comparison"}), 400
+             
+        return jsonify({"stock1": st1, "stock2": st2})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/predict/<symbol>")
 def predict_stock(symbol):
+    models_param = request.args.get("models", "RNN,LSTM,GRU").split(",")
+    random.seed(42); np.random.seed(42); torch.manual_seed(42)
+
     try:
-        df = clean_ohlcv(yf.download(symbol, period="4y", progress=False, threads=False))
+        df = clean_ohlcv(yf.download(symbol, period="5y", auto_adjust=False, progress=False))
+        if df.empty or len(df) < 100:
+            return jsonify({"error": "Insufficient historical data (min 100 days required)"}), 404
 
-        if df.empty:
-            return jsonify({"error": "No data"}), 404
+        window     = 40
+        volatility = float(df['Close'].pct_change().dropna().std()) if len(df) > 1 else 0.02
+        avg_volume = int(df["Volume"].mean())
+        last_date  = df.index[-1]
+        
+        # Split for evaluation
+        df_train   = df.iloc[:-15]
+        df_eval    = df.tail(15)
 
-        window = 60
-        last_date = df.index[-1]
+        results    = {}
+        accuracy   = {}
 
-        X, y, scaler = prepare_data(df, window)
+        for tag in models_param:
+            try:
+                # ── eval on last 15 days ──
+                X_e, y_e, sc_e = prepare_data(df_train, window)
+                if tag == "RNN":
+                    bw, bu = ga_optimize(df_train)
+                    m_eval = train_model(SimpleRNN(1, bu), X_e, y_e, epochs=50)
+                    preds_eval = forecast_future(m_eval, sc_e, df_train, bw, 15)
+                    final_window = bw
+                elif tag == "LSTM":
+                    m_eval = train_model(SimpleLSTM(1, 64), X_e, y_e, epochs=50)
+                    preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
+                    final_window = window
+                else:
+                    m_eval = train_model(SimpleGRU(1, 64), X_e, y_e, epochs=50)
+                    preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
+                    final_window = window
 
-        models = {
-            "RNN": SimpleRNN(5, 64),
-            "LSTM": SimpleLSTM(5, 64),
-            "GRU": SimpleGRU(5, 64)
-        }
+                actual = df_eval["Close"].values[:len(preds_eval)]
+                mae, rmse, da = compute_metrics(actual, preds_eval)
+                accuracy[tag] = {"mae": mae, "rmse": rmse, "da": da}
 
-        results = {}
-        accuracy = {}
+                # ── future prediction ──
+                X_f, y_f, sc_f = prepare_data(df, final_window)
+                if tag == "RNN":
+                    m_fut  = train_model(SimpleRNN(1, bu), X_f, y_f, epochs=80)
+                    preds  = forecast_future(m_fut, sc_f, df, final_window)
+                elif tag == "LSTM":
+                    m_fut = train_model(SimpleLSTM(1, 64), X_f, y_f, epochs=80)
+                    preds = forecast_future(m_fut, sc_f, df, final_window)
+                else:
+                    m_fut = train_model(SimpleGRU(1, 64), X_f, y_f, epochs=80)
+                    preds = forecast_future(m_fut, sc_f, df, final_window)
 
-        for tag, net in models.items():
-            model_path = model_file_path(symbol, tag)
+                df_fut = build_future_df(preds, last_date, avg_volume, volatility)
+                results[tag] = df_to_records(df_fut)
+            except Exception as model_err:
+                print(f"Error training {tag}: {model_err}")
+                continue
 
-            if model_path.exists():
-                net.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
-            else:
-                net = train_model(net, X, y, epochs=20)
-                torch.save(net.state_dict(), str(model_path))
+        if not results:
+            return jsonify({"error": "All models failed to train"}), 500
 
-            preds = forecast_future(net, scaler, df, window)
+        actual_candles = df_to_records(df.tail(20))
 
-            df_fut = build_future_df(preds, last_date)
-            results[tag] = df_to_records(df_fut)
+        # consensus
+        votes = []
+        for tag, rows in results.items():
+            chg = rows[-1]["close"] - rows[0]["close"]
+            votes.append("UP" if chg > 0 else "DOWN")
 
-            actual = df["Close"].tail(15).values
-            mae, rmse = compute_metrics(actual, preds)
+        up = votes.count("UP")
+        dn = votes.count("DOWN")
+        if up == len(votes):   consensus = "ALL_UP"
+        elif dn == len(votes): consensus = "ALL_DOWN"
+        elif up > dn:           consensus = "MAJORITY_UP"
+        elif dn > up:           consensus = "MAJORITY_DOWN"
+        else:                   consensus = "SPLIT"
 
-            accuracy[tag] = {"mae": mae, "rmse": rmse}
+        best = min(accuracy, key=lambda t: accuracy[t]["rmse"])
 
         return jsonify({
+            "actual":    actual_candles,
             "predicted": results,
-            "accuracy": accuracy
+            "accuracy":  accuracy,
+            "consensus": consensus,
+            "best":      best
         })
 
     except Exception as e:
+        import traceback
         traceback.print_exc()
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({"error": str(e)}), 500
 
-
-# ─── RUN ─────────────────────────────────────────────
+@app.route("/api/news/<symbol>")
+def get_news(symbol):
+    try:
+        tkr = yf.Ticker(symbol)
+        raw_news = tkr.news
+        cleaned = []
+        if not raw_news:
+             return jsonify([])
+             
+        for n in raw_news[:8]: # Show more news
+            # Handle different yfinance response formats
+            title = n.get("title")
+            link = n.get("link")
+            summary = n.get("summary", "")
+            pub = n.get("providerPublishTime") or n.get("pubDate")
+            
+            # Nested content format
+            if not title and "content" in n:
+                c = n["content"]
+                title = c.get("title")
+                link = c.get("clickThroughUrl", {}).get("url") or c.get("canonicalUrl", {}).get("url")
+                summary = c.get("summary", "")
+                pub = c.get("pubDate")
+            
+            if title and link:
+                cleaned.append({
+                    "title": title, 
+                    "link": link, 
+                    "summary": summary[:200] + "..." if len(summary) > 200 else summary, 
+                    "pubDate": str(pub) if pub else ""
+                })
+        return jsonify(cleaned)
+    except Exception as e:
+        print(f"News error for {symbol}: {e}")
+        return jsonify([])
 
 if __name__ == "__main__":
-    init_db()
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    # Use port from environment for Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=False, host="0.0.0.0", port=port)

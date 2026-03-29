@@ -1,10 +1,10 @@
 flask
 flask-cors
-numpy
-pandas
-yfinance
-scikit-learn
-torch
-gunicorn
-mysql-connector-python
 psycopg2-binary
+python-dotenv
+torch
+numpy
+yfinance
+pandas
+scikit-learn
+gunicorn

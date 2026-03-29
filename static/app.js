@@ -81,11 +81,11 @@ function populateSelects() {
 /* ── ADD STOCK ─────────────────────────────────────────── */
 async function addStock() {
     const name = document.getElementById("add-name").value.trim();
-    const symbol = document.getElementById("add-symbol").value.trim().toUpperCase();
+    const symbol = document.getElementById("add-symbol").value.trim();
     const status = document.getElementById("add-status");
 
     if (!name || !symbol) {
-        setStatus(status, "⚠️ Please fill in both company name and ticker symbol.", false);
+        setStatus(status, "⚠ Please fill in both fields.", false);
         return;
     }
 
@@ -96,22 +96,19 @@ async function addStock() {
             body: JSON.stringify({ name, symbol })
         });
         const data = await res.json();
-        console.log("addStock response", res.status, data);
 
         if (data.error) {
-            setStatus(status, data.error, false);
-            toast(data.error, false);
-        } else if (data.success) {
-            setStatus(status, `✅ ${data.name} (${data.symbol}) added successfully!`, true);
+            setStatus(status, "❌ " + data.error, false);
+        } else {
+            setStatus(status, `✅ ${data.name} (${data.symbol}) added!`, true);
             document.getElementById("add-name").value = "";
             document.getElementById("add-symbol").value = "";
             await loadStocks();
             document.getElementById("stat-total-val").textContent = stocks.length;
-            toast("Stock added to watchlist", true);
+            toast("Stock added successfully", true);
         }
     } catch (e) {
-        console.error(e);
-        setStatus(status, "❌ Network error. Please try again.", false);
+        setStatus(status, "❌ Server error.", false);
     }
 }
 
@@ -148,32 +145,16 @@ function renderAllStocks() {
 /* ── VIEW STOCK ────────────────────────────────────────── */
 async function loadView() {
     const symbol = document.getElementById("view-select").value;
-    if (!symbol) { 
-        toast("⚠️ Please select a stock from the list", false); 
-        return; 
-    }
+    if (!symbol) { toast("Please select a stock", false); return; }
 
-    show("view-loader"); 
-    hide("view-result");
+    show("view-loader"); hide("view-result");
 
     try {
         const res = await fetch(`/api/view/${symbol}`);
         const data = await res.json();
-        
-        if (data.error) { 
-            toast(`❌ ${data.error}`, false); 
-            hide("view-loader"); 
-            return; 
-        }
+        if (data.error) { toast(data.error, false); hide("view-loader"); return; }
 
-        if (!data.candles || data.candles.length === 0) {
-            toast(`❌ No chart data available for ${symbol}`, false);
-            hide("view-loader");
-            return;
-        }
-
-        hide("view-loader"); 
-        show("view-result");
+        hide("view-loader"); show("view-result");
         fetchNews(symbol, "view-news");
 
         const stock = stocks.find(s => s.symbol === symbol) || { name: symbol };
@@ -221,9 +202,8 @@ async function loadView() {
         });
 
     } catch (e) {
-        console.error(e);
         hide("view-loader");
-        toast("❌ Failed to load chart data. Check your connection.", false);
+        toast("Failed to load stock data", false);
     }
 }
 
@@ -231,36 +211,17 @@ async function loadView() {
 async function compareStocks() {
     const s1 = document.getElementById("cmp-s1").value;
     const s2 = document.getElementById("cmp-s2").value;
-    
-    if (!s1 || !s2) { 
-        toast("⚠️ Please select both stocks to compare", false); 
-        return; 
-    }
-    if (s1 === s2) { 
-        toast("❌ Please select two different stocks", false); 
-        return; 
-    }
+    if (!s1 || !s2) { toast("Select both stocks", false); return; }
+    if (s1 === s2) { toast("Please select two different stocks", false); return; }
 
-    show("cmp-loader"); 
-    hide("cmp-result");
+    show("cmp-loader"); hide("cmp-result");
 
     try {
         const res = await fetch(`/api/compare?s1=${s1}&s2=${s2}`);
         const data = await res.json();
-        
-        if (data.error) { 
-            toast(`❌ ${data.error}`, false); 
-            hide("cmp-loader"); 
-            return; 
-        }
-        if (!data.stock1 || !data.stock2) {
-            toast(`❌ Could not load data for one or both stocks`, false);
-            hide("cmp-loader");
-            return;
-        }
+        if (data.error) { toast(data.error, false); hide("cmp-loader"); return; }
 
-        hide("cmp-loader"); 
-        show("cmp-result");
+        hide("cmp-loader"); show("cmp-result");
         fetchNews(s1, "cmp-news-1");
         fetchNews(s2, "cmp-news-2");
 
@@ -268,9 +229,8 @@ async function compareStocks() {
         renderComparePanel("cmp-chart-2", "cmp-label-2", "cmp-stats-2", s2, data.stock2, "#ff6b35", cmpChart2, c => cmpChart2 = c);
 
     } catch (e) {
-        console.error(e);
         hide("cmp-loader");
-        toast("❌ Failed to load comparison data. Check connection.", false);
+        toast("Failed to load comparison", false);
     }
 }
 
@@ -324,22 +284,15 @@ function renderComparePanel(chartId, labelId, statsId, symbol, data, color, oldC
 /* ── PREDICT ───────────────────────────────────────────── */
 async function runPrediction() {
     const symbol = document.getElementById("pred-select").value;
-    if (!symbol) { 
-        toast("⚠️ Please select a stock to predict", false); 
-        return; 
-    }
+    if (!symbol) { toast("Please select a stock", false); return; }
 
     const selected = [];
     if (document.getElementById("use-rnn").checked) selected.push("RNN");
     if (document.getElementById("use-lstm").checked) selected.push("LSTM");
     if (document.getElementById("use-gru").checked) selected.push("GRU");
-    if (!selected.length) { 
-        toast("⚠️ Select at least one AI model (RNN, LSTM, or GRU)", false); 
-        return; 
-    }
+    if (!selected.length) { toast("Select at least one algorithm", false); return; }
 
-    show("pred-loader"); 
-    hide("pred-result");
+    show("pred-loader"); hide("pred-result");
     document.getElementById("pred-btn").disabled = true;
 
     // progress animation
@@ -371,10 +324,7 @@ async function runPrediction() {
         hide("pred-loader");
         document.getElementById("pred-btn").disabled = false;
 
-        if (data.error) { 
-            toast(`❌ Prediction failed: ${data.error}`, false); 
-            return; 
-        }
+        if (data.error) { toast(data.error, false); return; }
 
         show("pred-result");
         window.lastPredictionData = data;
@@ -383,11 +333,10 @@ async function runPrediction() {
         fetchNews(symbol, "pred-news");
 
     } catch (e) {
-        console.error(e);
         clearInterval(progInterval);
         hide("pred-loader");
         document.getElementById("pred-btn").disabled = false;
-        toast("❌ Prediction server error. Please try again.", false);
+        toast("Prediction failed. Check server.", false);
     }
 }
 
@@ -553,59 +502,43 @@ function renderPrediction(data, selected, symbol) {
 async function deleteStock() {
     const symbol = document.getElementById("del-select").value;
     const status = document.getElementById("del-status");
-    if (!symbol) { 
-        setStatus(status, "⚠️ Select a stock to delete first.", false); 
-        return; 
-    }
+    if (!symbol) { setStatus(status, "⚠ Select a stock first.", false); return; }
 
-    if (!confirm(`⚠️ Are you sure you want to delete ${symbol} from your watchlist?`)) return;
+    if (!confirm(`Delete ${symbol} from your watchlist?`)) return;
 
     try {
         const res = await fetch(`/api/stocks/${symbol}`, { method: "DELETE" });
         const data = await res.json();
-        
-        if (res.ok && data.success) {
-            toast(`✅ ${symbol} deleted from watchlist`, true);
-            setStatus(status, `✅ ${symbol} deleted successfully.`, true);
+        if (data.success) {
+            toast(`${symbol} deleted`, true);
+            setStatus(status, `✅ ${symbol} deleted.`, true);
             await loadStocks();
             populateSelects();
-            document.getElementById("del-select").value = "";
-        } else {
-            setStatus(status, `❌ Failed to delete ${symbol}`, false);
-            toast(`❌ Failed to delete ${symbol}`, false);
         }
     } catch (e) {
-        console.error(e);
-        setStatus(status, "❌ Network error. Failed to delete.", false);
+        setStatus(status, "❌ Failed to delete.", false);
     }
 }
 
-
 async function confirmDeleteAll() {
     const status = document.getElementById("del-all-status");
-    if (!confirm("⚠️ Delete ALL stocks permanently? This cannot be undone.")) return;
-    if (!confirm("🔴 Are you absolutely sure? All watchlist items will be removed.")) return;
+    if (!confirm("⚠ Delete ALL stocks permanently? This cannot be undone.")) return;
+    if (!confirm("Are you absolutely sure?")) return;
 
     try {
         const res = await fetch("/api/stocks/all", { method: "DELETE" });
         const data = await res.json();
-        
-        if (res.ok && data.success) {
-            toast("✅ All stocks deleted from watchlist", true);
-            setStatus(status, "✅ All stocks deleted permanently.", true);
+        if (data.success) {
+            toast("All stocks deleted", true);
+            setStatus(status, "✅ All stocks deleted.", true);
             await loadStocks();
             populateSelects();
             document.getElementById("stat-total-val").textContent = "0";
-        } else {
-            setStatus(status, "❌ Failed to delete all stocks", false);
-            toast("❌ Failed to delete all stocks", false);
         }
     } catch (e) {
-        console.error(e);
-        setStatus(status, "❌ Network error. Delete failed.", false);
+        setStatus(status, "❌ Failed.", false);
     }
 }
-
 
 /* ── CHART OPTIONS ─────────────────────────────────────── */
 function chartOptions(containerId, height) {
@@ -681,13 +614,12 @@ async function fetchNews(symbol, containerId) {
     try {
         const res = await fetch(`/api/news/${symbol}`);
         const news = await res.json();
-        const realNews = Array.isArray(news) ? news : (Array.isArray(news.news) ? news.news : []);
-        if (realNews.length === 0) {
-            container.innerHTML = `<p style="font-size:12px;color:var(--muted)">${news.error || 'No recent news found.'}</p>`;
+        if (news.error || news.length === 0) {
+            container.innerHTML = `<p style="font-size:12px;color:var(--muted)">No recent news found.</p>`;
             return;
         }
         let html = '<div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">';
-        realNews.forEach(n => {
+        news.forEach(n => {
             let d = n.pubDate ? new Date(n.pubDate).toLocaleDateString() : 'Recent';
             html += `
                 <div style="background:var(--bg3);padding:14px;border-radius:8px;border:1px solid var(--border);transition:all 0.2s;">
@@ -713,18 +645,22 @@ async function renderMarketNews() {
         return;
     }
 
+    // Limit to first 10 stocks for overall portfolio news to prevent rate-limiting
+    const newsStocks = stocks.slice(0, 10);
     let allNews = [];
-    await Promise.all(stocks.map(async s => {
+
+    for (const s of newsStocks) {
         try {
             const res = await fetch(`/api/news/${s.symbol}`);
             const news = await res.json();
-            const realNews = Array.isArray(news) ? news : (Array.isArray(news.news) ? news.news : []);
-            if (realNews.length > 0) {
-                realNews.forEach(n => { n.stockSymbol = s.symbol; n.stockName = s.name; });
-                allNews = allNews.concat(realNews);
+            if (news && !news.error) {
+                news.forEach(n => { n.stockSymbol = s.symbol; n.stockName = s.name; });
+                allNews = allNews.concat(news);
             }
-        } catch (e) { }
-    }));
+            // Small delay to prevent rate-limiting from yfinance
+            await new Promise(r => setTimeout(r, 100));
+        } catch (e) { console.error(`News fetch failed for ${s.symbol}:`, e); }
+    }
 
     allNews.sort((a, b) => {
         if (!a.pubDate || !b.pubDate) return 0;
