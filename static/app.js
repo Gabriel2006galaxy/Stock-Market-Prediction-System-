@@ -681,12 +681,13 @@ async function fetchNews(symbol, containerId) {
     try {
         const res = await fetch(`/api/news/${symbol}`);
         const news = await res.json();
-        if (news.error || news.length === 0) {
-            container.innerHTML = `<p style="font-size:12px;color:var(--muted)">No recent news found.</p>`;
+        if (news.error || !Array.isArray(news) || news.news?.length === 0 || news.length === 0) {
+            container.innerHTML = `<p style="font-size:12px;color:var(--muted)">${news.error || 'No recent news found.'}</p>`;
             return;
         }
+        let realNews = Array.isArray(news) ? news : (news.news || []);
         let html = '<div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">';
-        news.forEach(n => {
+        realNews.forEach(n => {
             let d = n.pubDate ? new Date(n.pubDate).toLocaleDateString() : 'Recent';
             html += `
                 <div style="background:var(--bg3);padding:14px;border-radius:8px;border:1px solid var(--border);transition:all 0.2s;">

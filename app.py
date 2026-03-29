@@ -40,25 +40,45 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "stocks")
 }
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # Render Postgres URL
 STOCKS_FILE = Path(os.getenv("STOCKS_FILE", "stocks.json"))
 
-# DB connection: prefer Postgres DATABASE_URL, else fall back to MySQL, else local JSON file.
+POSTGRES_URL = os.getenv("DATABASE_URL")
+if not POSTGRES_URL:
+    POSTGRES_URL = os.getenv("RENDER_DATABASE_URL")  # fallback env name in Render
+
+# DB connection: Postgres is required for persistence; local stores are only fallback in unconfigured situations.
 def get_db():
-    if DATABASE_URL:
-        try:
-            conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
-            return conn
-        except Exception:
-            pass
+    if not POSTGRES_URL:
+        return None
+    try:
+        conn = psycopg2.connect(POSTGRES_URL, cursor_factory=psycopg2.extras.RealDictCursor, connect_timeout=5)
+        return conn
+    except Exception as e:
+        app.logger.error(f"Failed to connect to Postgres: {e}")
+        return None
 
-    if DB_CONFIG.get("password"):
-        try:
-            return mysql.connector.connect(**DB_CONFIG)
-        except Exception:
-            pass
 
-    return None
+def init_db():
+    conn = get_db()
+    if not conn:
+        app.logger.warning("Postgres DATABASE_URL is not set; database persistence is unavailable.")
+        return False
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS companies (
+                symbol VARCHAR(20) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL
+            )
+        """)
+        conn.commit()
+        return True
+    except Exception as e:
+        app.logger.error(f"Failed to initialize database: {e}")
+        return False
+    finally:
+        conn.close()
 
 
 def read_stock_file():
@@ -106,12 +126,16 @@ def persist_stock(symbol, name):
             cursor.execute("INSERT INTO companies (symbol,name) VALUES(%s,%s)", (symbol, name))
             conn.commit()
             return True
+        except psycopg2.errors.UniqueViolation:
+            # already exists
+            return False
         except Exception as e:
-            # duplicate key or any DB constraint means stock exists
+            app.logger.error(f"persist_stock DB error: {e}")
             return False
         finally:
             conn.close()
 
+    app.logger.warning("No DB connection available, using fallback file storage")
     stocks = read_stock_file()
     if any(s["symbol"] == symbol for s in stocks):
         return False
@@ -128,11 +152,13 @@ def remove_stock(symbol):
             cursor.execute("DELETE FROM companies WHERE symbol=%s", (symbol,))
             conn.commit()
             return True
-        except Exception:
+        except Exception as e:
+            app.logger.error(f"remove_stock DB error: {e}")
             return False
         finally:
             conn.close()
 
+    app.logger.warning("No DB connection available, using fallback file storage")
     stocks = read_stock_file()
     stocks = [s for s in stocks if s.get("symbol") != symbol]
     write_stock_file(stocks)
@@ -148,11 +174,13 @@ def remove_all_stocks():
             cursor.execute("DELETE FROM companies")
             conn.commit()
             return True
-        except Exception:
+        except Exception as e:
+            app.logger.error(f"remove_all_stocks DB error: {e}")
             return False
         finally:
             conn.close()
 
+    app.logger.warning("No DB connection available, using fallback file storage")
     write_stock_file([])
     return True
 
@@ -469,19 +497,20 @@ def stock_news(symbol):
         ticker = yf.Ticker(symbol)
         raw = ticker.news if hasattr(ticker, 'news') else []
         if not raw:
-            return jsonify([])
+            return jsonify({'error': f'No recent news for {symbol}', 'news': []})
 
         news_items = []
         for item in raw[:10]:
             news_items.append({
                 'title': item.get('title', 'No title'),
                 'link': item.get('link', ''),
-                'summary': item.get('summary', item.get('publisher', '')),
+                'summary': item.get('summary', item.get('publisher', '')), 
                 'pubDate': item.get('providerPublishTime')
             })
-        return jsonify(news_items)
-    except Exception:
-        return jsonify([])
+        return jsonify({'news': news_items})
+    except Exception as e:
+        app.logger.error(f"news fetch failed for {symbol}: {e}")
+        return jsonify({'error': 'Failed to fetch news', 'news': []}), 500
 
 
 @app.route("/api/predict/<symbol>")
@@ -538,4 +567,6 @@ def predict_stock(symbol):
 # ─── RUN ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    init_db()
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
