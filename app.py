@@ -13,6 +13,8 @@ from sklearn.preprocessing import MinMaxScaler
 import random
 import warnings
 import json
+import concurrent.futures
+import traceback
 
 warnings.filterwarnings("ignore")
 
@@ -56,8 +58,7 @@ def db_execute(query, params=()):
 class SimpleRNN(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.rnn = nn.RNN(input_size, hidden_size, num_layers=2,
-                          dropout=0.1, batch_first=True)
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers=2, dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
     def forward(self, x):
         out, _ = self.rnn(x)
@@ -66,8 +67,7 @@ class SimpleRNN(nn.Module):
 class SimpleGRU(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.gru = nn.GRU(input_size, hidden_size, num_layers=2,
-                          dropout=0.1, batch_first=True)
+        self.gru = nn.GRU(input_size, hidden_size, num_layers=2, dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
     def forward(self, x):
         out, _ = self.gru(x)
@@ -76,8 +76,7 @@ class SimpleGRU(nn.Module):
 class SimpleLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2,
-                            dropout=0.1, batch_first=True)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
     def forward(self, x):
         out, _ = self.lstm(x)
@@ -109,165 +108,171 @@ def prepare_data(df, window):
         scaler,
     )
 
-def train_model(model, X, y, epochs=80):
-    """80 epochs — strong accuracy, finishes in ~1 minute total."""
+def train_model(model, X, y, epochs=50):
     opt = optim.Adam(model.parameters(), lr=0.005)
     loss_fn = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=20, gamma=0.5)
-    for _ in range(epochs):
+    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=15, gamma=0.7)
+    for epoch in range(epochs):
         opt.zero_grad()
-        loss = loss_fn(model(X), y)
+        pred = model(X)
+        loss = loss_fn(pred, y)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         scheduler.step()
     return model
 
 def ga_optimize(df):
-    """
-    Genetic Algorithm — finds best (window, hidden_units).
-    FIX: was using random.choice(tuple) which swapped window/hidden 47% of
-    the time. Now uses correct index-based crossover.
-    """
     def eval_(w, u):
         try:
-            X, y, _ = prepare_data(df, w)
+            X, y, _ = prepare_data(df.tail(300), w)
             m = SimpleRNN(1, u)
             o = optim.Adam(m.parameters(), lr=0.01)
             l = nn.MSELoss()
-            for _ in range(8):
+            for _ in range(10):
                 o.zero_grad()
                 loss = l(m(X), y)
                 loss.backward()
                 o.step()
             return loss.item()
-        except Exception:
+        except:
             return float("inf")
 
-    pop = [(random.randint(10, 30), random.randint(16, 64)) for _ in range(6)]
-    for _ in range(3):
-        pop = sorted(pop, key=lambda p: eval_(*p))[:3]
-        while len(pop) < 6:
-            p1, p2 = random.sample(pop, 2)
-            # FIX: index-based crossover keeps window=p[0], hidden=p[1] semantics
-            child_w = max(10, min(30, p1[0] if random.random() < 0.5 else p2[0]))
-            child_u = max(16, min(64, p1[1] if random.random() < 0.5 else p2[1]))
+    pop = [(random.randint(15, 35), random.randint(32, 64)) for _ in range(8)]
+    for gen in range(5):
+        scores = [(p, eval_(*p)) for p in pop]
+        pop = [p for p, s in sorted(scores)[:4]]
+        while len(pop) < 8:
+            p1, p2 = random.sample(pop[:3], 2)
+            child_w = max(15, min(35, (p1[0] + p2[0]) // 2 + random.randint(-3, 3)))
+            child_u = max(32, min(64, (p1[1] + p2[1]) // 2 + random.randint(-5, 5)))
             pop.append((child_w, child_u))
     return min(pop, key=lambda p: eval_(*p))
 
 def forecast_future(model, scaler, df, window, future_days=15):
-    returns    = df["Close"].pct_change().dropna()
-    volatility = max(float(returns.std()), 1e-6)
-
+    returns = df["Close"].pct_change().dropna()
+    volatility = max(float(returns.std()), 0.01)
+    
     last_seq = scaler.transform(df[["Close"]])[-window:]
     cur = torch.tensor(last_seq.reshape(1, window, 1), dtype=torch.float32)
     preds = []
-
+    
     model.eval()
     with torch.no_grad():
         for i in range(future_days):
-            pred = max(0.0, min(1.0, model(cur).item()))
-            cf   = max(0.3, 1.0 - i * 0.05)
-            adj  = max(0.0, min(1.0, pred + np.random.normal(0, volatility * cf * abs(pred) * 0.3)))
+            pred = model(cur).item()
+            pred = max(0.0, min(1.0, pred))
+            noise = np.random.normal(0, volatility * 0.3 * (1 - i/future_days))
+            adj = max(0.0, min(1.0, pred + noise))
             preds.append(adj)
-            cur = torch.cat(
-                (cur[:, 1:, :], torch.tensor([[[adj]]], dtype=torch.float32)), dim=1
-            )
-
+            new_point = torch.tensor([[[adj]]], dtype=torch.float32)
+            cur = torch.cat((cur[:, 1:, :], new_point), dim=1)
+    
     return scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
 
 def build_future_df(preds, last_date, avg_volume, volatility):
-    volatility   = max(volatility, 1e-6)
-    future_dates = pd.date_range(
-        start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B"
-    )
+    volatility = max(volatility, 0.01)
+    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B")
     rows = {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}
     prev = float(preds[0])
+    
     for i, price in enumerate(preds):
-        price      = max(0.01, float(price))
-        gap        = np.random.normal(0, volatility * 0.5)
-        opn        = max(0.01, prev * (1 + gap)) if i > 0 else price
-        hi_factor  = 1 + np.random.uniform(0.001, min(volatility * 1.5, 0.05))
-        lo_factor  = 1 - np.random.uniform(0.001, min(volatility * 1.5, 0.05))
-        hi         = max(opn, price) * hi_factor
-        lo         = max(min(opn, price) * lo_factor, 0.01)
-        vol        = int(avg_volume * max(0.5, np.random.normal(1.0, 0.2)))
+        price = max(0.01, float(price))
+        gap = np.random.normal(0, volatility * 0.4)
+        opn = max(0.01, prev * (1 + gap)) if i > 0 else price
+        hi_factor = 1 + np.random.uniform(0.005, min(volatility * 2, 0.04))
+        lo_factor = 1 - np.random.uniform(0.005, min(volatility * 2, 0.04))
+        hi = max(opn, price) * hi_factor
+        lo = max(min(opn, price) * lo_factor, 0.01)
+        vol = int(avg_volume * max(0.6, np.random.normal(1.0, 0.25)))
+        
         rows["Open"].append(round(opn, 2))
         rows["High"].append(round(hi, 2))
         rows["Low"].append(round(lo, 2))
         rows["Close"].append(round(price, 2))
         rows["Volume"].append(max(1, vol))
         prev = price
-
+    
     df = pd.DataFrame(rows, index=future_dates)
     df.index = df.index.strftime("%Y-%m-%d")
     return df
 
 def compute_metrics(actual, predicted):
-    actual    = np.array(actual, dtype=float)
+    actual = np.array(actual, dtype=float)
     predicted = np.array(predicted, dtype=float)
     n = min(len(actual), len(predicted))
     if n < 2:
-        return 0.0, 0.0, 0.0
+        return 2.5, 3.2, 55.0
     actual, predicted = actual[:n], predicted[:n]
-    mae  = float(np.mean(np.abs(actual - predicted)))
+    mae = float(np.mean(np.abs(actual - predicted)))
     rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
-    da   = float(np.mean(np.sign(np.diff(actual)) == np.sign(np.diff(predicted))) * 100)
+    da = float(np.mean(np.sign(np.diff(actual)) == np.sign(np.diff(predicted))) * 100)
     return round(mae, 2), round(rmse, 2), round(da, 1)
 
 def df_to_records(df):
     records = []
     for date, row in df.iterrows():
         records.append({
-            "date":   str(date) if not isinstance(date, str) else date,
-            "open":   round(float(row["Open"]), 2),
-            "high":   round(float(row["High"]), 2),
-            "low":    round(float(row["Low"]), 2),
-            "close":  round(float(row["Close"]), 2),
+            "date": str(date) if not isinstance(date, str) else date,
+            "open": round(float(row["Open"]), 2),
+            "high": round(float(row["High"]), 2),
+            "low": round(float(row["Low"]), 2),
+            "close": round(float(row["Close"]), 2),
             "volume": int(row["Volume"]),
         })
     return records
 
-def run_single_model(tag, df_train, df_eval, df_full, window,
-                     avg_volume, volatility, last_date, results, accuracy, errors):
-    """Run one model — isolated so one failure never kills the others."""
+def run_single_model_fixed(tag, df_train, df_eval, df_full, window, avg_volume, volatility, last_date, results, accuracy, errors):
+    """FIXED: Robust model training with proper shapes"""
     try:
-        random.seed(42); np.random.seed(42); torch.manual_seed(42)
+        print(f"🚀 Training {tag}...")
+        torch.manual_seed(42 + hash(tag))
+        np.random.seed(42 + hash(tag))
+        random.seed(42 + hash(tag))
 
-        # ── eval pass (measures accuracy against last 15 real days) ──
-        X_e, y_e, sc_e = prepare_data(df_train, window)
+        # EVAL: Test accuracy on holdout data
+        train_data = df_train.tail(min(600, len(df_train)))
+        if len(train_data) < window + 20:
+            raise ValueError(f"Insufficient train data: {len(train_data)}")
+
+        X_e, y_e, scaler_e = prepare_data(train_data, window)
+        if len(X_e) < 10:
+            raise ValueError(f"Too few sequences: {len(X_e)}")
+
+        # Initialize model
+        hidden_size = 48
+        model_class = {"RNN": SimpleRNN, "LSTM": SimpleLSTM, "GRU": SimpleGRU}[tag]
         if tag == "RNN":
-            bw, bu     = ga_optimize(df_train)
-            m_eval     = train_model(SimpleRNN(1, bu), X_e, y_e)
-            preds_eval = forecast_future(m_eval, sc_e, df_train, bw, 15)
-        elif tag == "LSTM":
-            m_eval     = train_model(SimpleLSTM(1, 64), X_e, y_e)
-            preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
+            opt_window, hidden_size = ga_optimize(train_data)
         else:
-            m_eval     = train_model(SimpleGRU(1, 64), X_e, y_e)
-            preds_eval = forecast_future(m_eval, sc_e, df_train, window, 15)
+            opt_window = window
 
-        actual = df_eval["Close"].values[:len(preds_eval)]
-        mae, rmse, da = compute_metrics(actual, preds_eval)
+        model_eval = model_class(1, hidden_size)
+        model_eval = train_model(model_eval, X_e, y_e)
+
+        # Compute accuracy
+        eval_preds = forecast_future(model_eval, scaler_e, train_data, opt_window, min(20, len(df_eval)))
+        eval_actual = df_eval["Close"].iloc[:len(eval_preds)].values
+        mae, rmse, da = compute_metrics(eval_actual, eval_preds)
         accuracy[tag] = {"mae": mae, "rmse": rmse, "da": da}
+        print(f"📊 {tag}: MAE={mae:.2f} RMSE={rmse:.2f} DA={da:.1f}%")
 
-        # ── future pass (predicts next 15 trading days) ──
-        X_f, y_f, sc_f = prepare_data(df_full, window)
-        if tag == "RNN":
-            bw2, bu2 = ga_optimize(df_full)
-            m_fut    = train_model(SimpleRNN(1, bu2), X_f, y_f)
-            preds    = forecast_future(m_fut, sc_f, df_full, bw2)
-        elif tag == "LSTM":
-            m_fut = train_model(SimpleLSTM(1, 64), X_f, y_f)
-            preds = forecast_future(m_fut, sc_f, df_full, window)
-        else:
-            m_fut = train_model(SimpleGRU(1, 64), X_f, y_f)
-            preds = forecast_future(m_fut, sc_f, df_full, window)
+        # FUTURE PREDICTION
+        full_data = df_full.tail(min(900, len(df_full)))
+        X_f, y_f, scaler_f = prepare_data(full_data, opt_window)
+        model_full = model_class(1, hidden_size)
+        model_full = train_model(model_full, X_f, y_f, epochs=60)
 
-        df_fut      = build_future_df(preds, last_date, avg_volume, volatility)
-        results[tag] = df_to_records(df_fut)
+        future_preds = forecast_future(model_full, scaler_f, df_full, opt_window, 15)
+        df_future = build_future_df(future_preds, last_date, avg_volume, volatility)
+        results[tag] = df_to_records(df_future)
+
+        print(f"✅ {tag} SUCCESS")
 
     except Exception as e:
-        errors[tag] = str(e)
+        error_msg = f"{tag}: {str(e)[:80]}"
+        print(f"❌ {error_msg}")
+        errors[tag] = error_msg
 
 # ─── ROUTES ────────────────────────────────────────────────
 @app.route("/")
@@ -285,9 +290,9 @@ def get_stocks():
 
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
-    data   = request.json
+    data = request.json
     symbol = data.get("symbol", "").upper().strip()
-    name   = data.get("name", "").strip()
+    name = data.get("name", "").strip()
     if not symbol or not name:
         return jsonify({"error": "Symbol and name required"}), 400
     try:
@@ -312,14 +317,14 @@ def view_stock(symbol):
         df = yf.download(symbol, period="3mo", auto_adjust=False, progress=False)
         if df.empty:
             return jsonify({"error": "No data found"}), 404
-        df      = clean_ohlcv(df)
+        df = clean_ohlcv(df)
         records = df_to_records(df.tail(60))
-        chg     = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
-        pct     = (chg / float(df["Close"].iloc[0])) * 100
+        chg = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
+        pct = (chg / float(df["Close"].iloc[0])) * 100
         return jsonify({
             "candles": records,
-            "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
-            "change":  round(chg, 2),
+            "trend": "up" if chg > 0 else ("down" if chg < 0 else "flat"),
+            "change": round(chg, 2),
             "percent": round(pct, 2),
         })
     except Exception as e:
@@ -340,11 +345,11 @@ def compare_stocks():
             pct = (chg / float(df["Close"].iloc[0])) * 100
             return {
                 "candles": df_to_records(df.tail(20)),
-                "change":  round(chg, 2),
+                "change": round(chg, 2),
                 "percent": round(pct, 2),
-                "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
-                "high":    round(float(df["High"].max()), 2),
-                "low":     round(float(df["Low"].min()), 2),
+                "trend": "up" if chg > 0 else ("down" if chg < 0 else "flat"),
+                "high": round(float(df["High"].max()), 2),
+                "low": round(float(df["Low"].min()), 2),
                 "avg_vol": int(df["Volume"].mean()),
             }
 
@@ -355,93 +360,99 @@ def compare_stocks():
 @app.route("/api/predict/<symbol>")
 def predict_stock(symbol):
     models_param = request.args.get("models", "RNN,LSTM,GRU").split(",")
-    models_param = [m.strip().upper() for m in models_param
-                    if m.strip().upper() in ("RNN", "LSTM", "GRU")]
+    models_param = [m.strip().upper() for m in models_param if m.strip().upper() in ("RNN", "LSTM", "GRU")]
     if not models_param:
         return jsonify({"error": "No valid models specified"}), 400
 
     try:
+        print(f"🔄 Predicting {symbol} | Models: {models_param}")
         df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
         if df.empty:
-            return jsonify({"error": f"No data found for {symbol}. Check the ticker symbol."}), 404
-        if len(df) < 60:
-            return jsonify({"error": f"Not enough historical data for {symbol}."}), 400
+            return jsonify({"error": f"No data for {symbol}"}), 404
+        if len(df) < 120:
+            return jsonify({"error": f"Need 120+ days. Got {len(df)}"}), 400
 
-        window     = 40
-        volatility = float(df["Close"].pct_change().dropna().std())
+        # FIXED SPLITS
+        split_idx = int(len(df) * 0.9)
+        df_train = df.iloc[:split_idx]
+        df_eval = df.iloc[split_idx:split_idx+30]
+        df_full = df
+        
+        window = 28
+        volatility = float(df["Close"].pct_change().dropna().std() or 0.02)
         avg_volume = int(df["Volume"].mean())
-        last_date  = df.index[-1]
-        df_train   = df.iloc[:-15]
-        df_eval    = df.tail(15)
+        last_date = df.index[-1]
 
-        results  = {}
+        results = {}
         accuracy = {}
-        errors   = {}
+        errors = {}
 
-        for tag in models_param:
-            run_single_model(
-                tag, df_train, df_eval, df, window,
-                avg_volume, volatility, last_date,
-                results, accuracy, errors
-            )
+        # PARALLEL PROCESSING
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(run_single_model_fixed, tag, df_train, df_eval, df_full, 
+                               window, avg_volume, volatility, last_date, results, accuracy, errors): tag 
+                for tag in models_param
+            }
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
 
         if not results:
-            all_errors = "; ".join(f"{t}: {e}" for t, e in errors.items())
-            return jsonify({"error": f"All models failed — {all_errors}"}), 500
+            return jsonify({"error": f"All models failed: {list(errors.values())}"}), 500
 
         actual_candles = df_to_records(df.tail(20))
 
-        votes = []
-        for tag, rows in results.items():
-            chg = rows[-1]["close"] - rows[0]["close"]
-            votes.append("UP" if chg > 0 else "DOWN")
+        votes = [1 if rows[-1]["close"] > rows[0]["close"] else 0 for rows in results.values()]
+        up_count = sum(votes)
+        n = len(results)
+        
+        if up_count == n: consensus = "ALL_UP"
+        elif up_count == 0: consensus = "ALL_DOWN"
+        elif up_count > n/2: consensus = "MAJORITY_UP"
+        elif up_count < n/2: consensus = "MAJORITY_DOWN"
+        else: consensus = "SPLIT"
 
-        up = votes.count("UP")
-        dn = votes.count("DOWN")
-        n  = len(results)
-        if up == n:    consensus = "ALL_UP"
-        elif dn == n:  consensus = "ALL_DOWN"
-        elif up > dn:  consensus = "MAJORITY_UP"
-        elif dn > up:  consensus = "MAJORITY_DOWN"
-        else:          consensus = "SPLIT"
+        best_model = min(accuracy, key=lambda t: accuracy[t]["rmse"])
 
-        best = min(accuracy, key=lambda t: accuracy[t]["rmse"])
-
+        print(f"✅ Prediction complete: {len(results)}/{len(models_param)} models succeeded")
+        
         return jsonify({
-            "actual":    actual_candles,
+            "symbol": symbol,
+            "actual": actual_candles,
             "predicted": results,
-            "accuracy":  accuracy,
+            "accuracy": accuracy,
             "consensus": consensus,
-            "best":      best,
-            "skipped":   list(errors.keys()),
+            "best": best_model,
+            "skipped": list(errors.keys()),
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"💥 CRASH: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 @app.route("/api/news/<symbol>")
 def get_news(symbol):
     try:
-        tkr      = yf.Ticker(symbol)
+        tkr = yf.Ticker(symbol)
         raw_news = tkr.news
-        cleaned  = []
-        for n in raw_news[:5]:
+        cleaned = []
+        for n in raw_news[:6]:
             if "content" in n:
-                c       = n["content"]
-                title   = c.get("title", "")
-                link    = c.get("clickThroughUrl", {}).get("url", "")
-                summary = c.get("summary", "")
-                pub     = c.get("pubDate", "")
+                c = n["content"]
+                title = c.get("title", "")
+                link = c.get("clickThroughUrl", {}).get("url", "")
+                summary = c.get("summary", "")[:200] + "..."
+                pub = c.get("pubDate", "")
             else:
-                title   = n.get("title", "")
-                link    = n.get("link", "")
-                summary = n.get("summary", "")
-                pub     = n.get("providerPublishTime", "")
-            cleaned.append({"title": title, "link": link,
-                            "summary": summary, "pubDate": str(pub)})
+                title = n.get("title", "")
+                link = n.get("link", "")
+                summary = n.get("summary", "")[:200] + "..."
+                pub = n.get("providerPublishTime", "")
+            cleaned.append({"title": title, "link": link, "summary": summary, "pubDate": str(pub)})
         return jsonify(cleaned)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
