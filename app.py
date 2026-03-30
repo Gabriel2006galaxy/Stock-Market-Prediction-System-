@@ -12,22 +12,17 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import warnings
 
-
 warnings.filterwarnings("ignore")
-
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-
 app = Flask(__name__)
 CORS(app)
-
 
 def get_db():
     if not DATABASE_URL:
         raise Exception("DATABASE_URL not set in Render")
     return psycopg2.connect(DATABASE_URL, sslmode="require")
-
 
 def db_fetchall(query, params=()):
     conn = get_db()
@@ -37,14 +32,12 @@ def db_fetchall(query, params=()):
     conn.close()
     return rows
 
-
 def db_execute(query, params=()):
     conn = get_db()
     cur  = conn.cursor()
     cur.execute(query, params)
     conn.commit()
     conn.close()
-
 
 def init_db():
     conn = get_db()
@@ -58,9 +51,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 init_db()
-
 
 # ─── HELPERS ───────────────────────────────────────────────
 def clean_ohlcv(df):
@@ -72,7 +63,6 @@ def clean_ohlcv(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna()
-
 
 def df_to_records(df):
     records = []
@@ -87,10 +77,8 @@ def df_to_records(df):
         })
     return records
 
-
 # Features — all lagged so no data leakage
 FEATURES = ["Lag1","Lag2","Lag3","MA5","MA10","MA20","Return1","Return5","Std5"]
-
 
 def add_features(df):
     """
@@ -111,7 +99,6 @@ def add_features(df):
     return df.dropna()
 
 
-
 def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatility):
     future_dates = pd.date_range(
         start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B"
@@ -119,7 +106,6 @@ def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatili
     swing      = max(min(hist_volatility, 0.03), 0.003)
     data       = []
     prev_close = last_close
-
 
     for d, close_price in zip(future_dates, preds):
         close_price = float(close_price)
@@ -138,7 +124,6 @@ def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatili
     return data
 
 
-
 def run_single_model(tag, df_train, df_eval, df_full,
                      avg_volume, volatility, last_date,
                      results, accuracy, errors):
@@ -148,67 +133,40 @@ def run_single_model(tag, df_train, df_eval, df_full,
         X_train    = train_feat[FEATURES].values
         y_train    = train_feat["Target"].values
 
-
         # Models:
         # RNN  → Ridge regression (regularised linear, no leakage, realistic errors)
         # LSTM → GradientBoosting (captures non-linear patterns)
-        # GRU  → RandomForest (ensemble, different predictions from above two)
+        # GRU  → RandomForest    (ensemble, different predictions from above two)
         scaler = None
-
         if tag == "RNN":
             scaler = StandardScaler()
-            # Only changed line for RNN (Railway‑safe accuracy‑tweak)
-            model  = Ridge(alpha=0.3, random_state=42)
+            model  = Ridge(alpha=1.0)
             model.fit(scaler.fit_transform(X_train), y_train)
 
-
         elif tag == "LSTM":
-            # Only changed line for LSTM (Railway‑safe: more trees, slower steps)
-            model = GradientBoostingRegressor(
-                n_estimators=130,              # 100 → 130
-                learning_rate=0.05,
-                max_depth=5,
-                min_samples_leaf=5,
-                subsample=0.9,
-                random_state=42
-            )
+            model = GradientBoostingRegressor(n_estimators=100, random_state=42)
             model.fit(X_train, y_train)
-
 
         else:  # GRU
-            # Only changed line for GRU (Railway‑safe: more trees, safer splits)
-            model = RandomForestRegressor(
-                n_estimators=130,              # 100 → 130
-                max_depth=10,
-                min_samples_leaf=3,
-                max_features="sqrt",
-                random_state=42,
-                n_jobs=-1
-            )
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
             model.fit(X_train, y_train)
-
 
         # ── Evaluate on held-out last 15 days ───────────────────────────
         # Prepend 20 rows of training context so all rolling windows are warm
         context   = pd.concat([df_train.tail(20), df_eval])
         eval_feat = add_features(context).iloc[-len(df_eval):]
 
-
         X_eval = eval_feat[FEATURES].values
         y_true = eval_feat["Target"].values
 
-
         y_pred = model.predict(scaler.transform(X_eval) if scaler else X_eval)
-
 
         n = min(len(y_true), len(y_pred))
         y_true, y_pred = y_true[:n], y_pred[:n]
 
-
         mae  = float(mean_absolute_error(y_true, y_pred))
         rmse = float(mean_squared_error(y_true, y_pred) ** 0.5)
         da   = float(np.mean(np.sign(np.diff(y_true)) == np.sign(np.diff(y_pred))) * 100) if n >= 2 else 0.0
-
 
         accuracy[tag] = {
             "mae":  round(mae,  2),
@@ -216,15 +174,12 @@ def run_single_model(tag, df_train, df_eval, df_full,
             "da":   round(da,   1),
         }
 
-
         # ── Forecast next 15 trading days (autoregressive) ──────────────
         full_feat  = add_features(df_full)
         last_state = full_feat[FEATURES].values[-1].copy()
 
-
         # Track last 20 closes for accurate rolling feature updates
         hist = list(df_full["Close"].values[-20:])
-
 
         preds = []
         for _ in range(15):
@@ -232,32 +187,27 @@ def run_single_model(tag, df_train, df_eval, df_full,
             pred = float(model.predict(scaler.transform(inp) if scaler else inp)[0])
             preds.append(pred)
 
-
             # Append prediction and recompute all lagged features
             hist.append(pred)
             arr = np.array(hist)
 
-
-            last_state[0] = arr[-2]                                    # Lag1
-            last_state[1] = arr[-3]                                    # Lag2
-            last_state[2] = arr[-4]                                    # Lag3
-            last_state[3] = arr[-6:-1].mean()                          # MA5
+            last_state[0] = arr[-2]                           # Lag1
+            last_state[1] = arr[-3]                           # Lag2
+            last_state[2] = arr[-4]                           # Lag3
+            last_state[3] = arr[-6:-1].mean()                 # MA5
             last_state[4] = arr[-11:-1].mean() if len(arr) >= 11 else arr[:-1].mean()  # MA10
             last_state[5] = arr[-21:-1].mean() if len(arr) >= 21 else arr[:-1].mean()  # MA20
-            last_state[6] = (arr[-2] - arr[-3]) / arr[-3] if arr[-3] != 0 else 0      # Return1
+            last_state[6] = (arr[-2] - arr[-3]) / arr[-3] if arr[-3] != 0 else 0       # Return1
             last_state[7] = (arr[-2] - arr[-7]) / arr[-7] if len(arr) >= 7 and arr[-7] != 0 else 0  # Return5
-            last_state[8] = arr[-6:-1].std() if len(arr) >= 6 else 0                  # Std5
-
+            last_state[8] = arr[-6:-1].std() if len(arr) >= 6 else 0                   # Std5
 
         results[tag] = build_future_candles(
             preds, float(df_full["Close"].iloc[-1]),
             last_date, avg_volume, volatility
         )
 
-
     except Exception as e:
         errors[tag] = str(e)
-
 
 
 # ─── ROUTES ────────────────────────────────────────────────
@@ -265,12 +215,10 @@ def run_single_model(tag, df_train, df_eval, df_full,
 def index():
     return render_template("index.html")
 
-
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
     rows = db_fetchall("SELECT symbol, name FROM companies")
     return jsonify([{"symbol": r["symbol"], "name": r["name"]} for r in rows])
-
 
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
@@ -288,18 +236,15 @@ def add_stock():
     except Exception as e:
         return jsonify({"error": str(e)}), 409
 
-
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
     db_execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
     return jsonify({"success": True})
 
-
 @app.route("/api/stocks/all", methods=["DELETE"])
 def delete_all_stocks():
     db_execute("DELETE FROM companies")
     return jsonify({"success": True})
-
 
 @app.route("/api/view/<symbol>")
 def view_stock(symbol):
@@ -320,7 +265,6 @@ def view_stock(symbol):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/api/compare")
 def compare_stocks():
     s1 = request.args.get("s1", "")
@@ -330,7 +274,6 @@ def compare_stocks():
         d2 = clean_ohlcv(yf.download(s2, period="1mo", auto_adjust=False, progress=False))
         if d1.empty or d2.empty:
             return jsonify({"error": "No data"}), 404
-
 
         def stats(df):
             chg = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
@@ -345,11 +288,9 @@ def compare_stocks():
                 "avg_vol": int(df["Volume"].mean()),
             }
 
-
         return jsonify({"stock1": stats(d1), "stock2": stats(d2)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/predict/<symbol>")
 def predict_stock(symbol):
@@ -359,7 +300,6 @@ def predict_stock(symbol):
     if not models_param:
         return jsonify({"error": "No valid models specified"}), 400
 
-
     try:
         df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
         if df.empty:
@@ -367,18 +307,15 @@ def predict_stock(symbol):
         if len(df) < 60:
             return jsonify({"error": f"Not enough historical data for {symbol}."}), 400
 
-
         volatility = float(df["Close"].pct_change().dropna().std())
         avg_volume = int(df["Volume"].mean())
         last_date  = df.index[-1]
         df_train   = df.iloc[:-15]
         df_eval    = df.tail(15)
 
-
         results  = {}
         accuracy = {}
         errors   = {}
-
 
         for tag in models_param:
             run_single_model(
@@ -387,20 +324,16 @@ def predict_stock(symbol):
                 results, accuracy, errors
             )
 
-
         if not results:
             all_errors = "; ".join(f"{t}: {e}" for t, e in errors.items())
             return jsonify({"error": f"All models failed — {all_errors}"}), 500
 
-
         actual_candles = df_to_records(df.tail(20))
-
 
         votes = []
         for tag, rows in results.items():
             chg = rows[-1]["close"] - rows[0]["close"]
             votes.append("UP" if chg > 0 else "DOWN")
-
 
         up = votes.count("UP")
         dn = votes.count("DOWN")
@@ -411,9 +344,7 @@ def predict_stock(symbol):
         elif dn > up:  consensus = "MAJORITY_DOWN"
         else:          consensus = "SPLIT"
 
-
         best = min(accuracy, key=lambda t: accuracy[t]["rmse"])
-
 
         return jsonify({
             "actual":    actual_candles,
@@ -424,10 +355,8 @@ def predict_stock(symbol):
             "skipped":   list(errors.keys()),
         })
 
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/news/<symbol>")
 def get_news(symbol):
@@ -437,7 +366,7 @@ def get_news(symbol):
         cleaned  = []
         for n in raw_news[:5]:
             if "content" in n:
-                c     = n["content"]
+                c       = n["content"]
                 title   = c.get("title", "")
                 link    = c.get("clickThroughUrl", {}).get("url", "")
                 summary = c.get("summary", "")
@@ -447,16 +376,11 @@ def get_news(symbol):
                 link    = n.get("link", "")
                 summary = n.get("summary", "")
                 pub     = n.get("providerPublishTime", "")
-            cleaned.append({
-                "title": title,
-                "link": link,
-                "summary": summary,
-                "pubDate": str(pub)
-            })
+            cleaned.append({"title": title, "link": link,
+                            "summary": summary, "pubDate": str(pub)})
         return jsonify(cleaned)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
