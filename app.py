@@ -157,32 +157,33 @@ def run_single_model(tag, df_train, df_eval, df_full,
 
         if tag == "RNN":
             scaler = StandardScaler()
-            # Railway‑safe: slightly stronger regularization = a bit more stable
+            # Only changed line for RNN (Railway‑safe accuracy‑tweak)
             model  = Ridge(alpha=0.3, random_state=42)
             model.fit(scaler.fit_transform(X_train), y_train)
 
 
         elif tag == "LSTM":
-            # Railway‑safe: more capacity without blowing up CPU
+            # Only changed line for LSTM (Railway‑safe: more trees, slower steps)
             model = GradientBoostingRegressor(
-                n_estimators=150,              # 100 → 150
-                learning_rate=0.05,            # smaller steps
+                n_estimators=130,              # 100 → 130
+                learning_rate=0.05,
                 max_depth=5,
                 min_samples_leaf=5,
-                subsample=0.9,                 # light bagging
+                subsample=0.9,
                 random_state=42
             )
             model.fit(X_train, y_train)
 
 
         else:  # GRU
+            # Only changed line for GRU (Railway‑safe: more trees, safer splits)
             model = RandomForestRegressor(
-                n_estimators=150,              # 100 → 150
+                n_estimators=130,              # 100 → 130
                 max_depth=10,
                 min_samples_leaf=3,
-                max_features="sqrt",           # safer for noisy data
+                max_features="sqrt",
                 random_state=42,
-                n_jobs=-1                      # use available cores
+                n_jobs=-1
             )
             model.fit(X_train, y_train)
 
