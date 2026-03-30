@@ -344,7 +344,9 @@ function renderPrediction(data, selected, symbol) {
         const rows  = data.predicted[tag];
         const acc   = data.accuracy[tag];
         const color = COLORS[tag];
-        const chg   = rows[rows.length - 1].close - rows[0].close;
+        const lastActual = data.actual[data.actual.length - 1].close;
+        const lastPred   = rows[rows.length - 1].close;
+        const chg        = lastPred - lastActual;
         const arrow = chg >= 0 ? "▲" : "▼";
         const cls   = chg >= 0 ? "var(--green)" : "var(--red)";
         const panel = document.createElement("div");
