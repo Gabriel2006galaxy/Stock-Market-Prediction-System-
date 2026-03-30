@@ -12,17 +12,13 @@ from sklearn.svm import SVR
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import warnings
-import json
 
 warnings.filterwarnings("ignore")
 
-# ─── DB CONNECTION ─────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 app = Flask(__name__)
 CORS(app)
-
-# init_db() will be called after definition in the __main__ block
 
 def get_db():
     if not DATABASE_URL:
@@ -31,10 +27,7 @@ def get_db():
 
 def db_fetchall(query, params=()):
     conn = get_db()
-    if DATABASE_URL:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        cur = conn.cursor()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(query, params)
     rows = cur.fetchall()
     conn.close()
@@ -42,18 +35,18 @@ def db_fetchall(query, params=()):
 
 def db_execute(query, params=()):
     conn = get_db()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute(query, params)
     conn.commit()
     conn.close()
 
 def init_db():
     conn = get_db()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS companies (
             symbol TEXT PRIMARY KEY,
-            name TEXT
+            name   TEXT
         )
     """)
     conn.commit()
@@ -77,136 +70,136 @@ def df_to_records(df):
     for date, row in df.iterrows():
         records.append({
             "date":   str(date) if not isinstance(date, str) else date,
-            "open":   round(float(row["Open"]), 2),
-            "high":   round(float(row["High"]), 2),
-            "low":    round(float(row["Low"]), 2),
+            "open":   round(float(row["Open"]),  2),
+            "high":   round(float(row["High"]),  2),
+            "low":    round(float(row["Low"]),   2),
             "close":  round(float(row["Close"]), 2),
             "volume": int(row["Volume"]),
         })
     return records
 
-def run_single_model(tag, df_train, df_eval, df_full, window,
-                    avg_volume, volatility, last_date, results, accuracy, errors, models, scalers):
+def add_features(df):
+    """
+    Add MA5, MA10, Return — uses min_periods=1 so short eval windows
+    never produce NaN rows.
+    """
+    df = df.copy()
+    df["MA5"]    = df["Close"].rolling(5,  min_periods=1).mean()
+    df["MA10"]   = df["Close"].rolling(10, min_periods=1).mean()
+    df["Return"] = df["Close"].pct_change().fillna(0)
+    return df
+
+def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatility):
+    """
+    Build realistic OHLC candles from predicted close prices.
+    High/Low swing is derived from historical daily volatility so candles
+    look like real market data rather than flat lines.
+    """
+    future_dates = pd.date_range(
+        start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B"
+    )
+    # intraday swing: use historical vol, clamp to sensible range
+    swing      = max(min(hist_volatility, 0.03), 0.003)
+    data       = []
+    prev_close = last_close
+
+    for d, close_price in zip(future_dates, preds):
+        close_price = float(close_price)
+        open_price  = float(prev_close)
+
+        intraday_hi = np.random.uniform(0.002, swing * 1.5)
+        intraday_lo = np.random.uniform(0.002, swing * 1.5)
+
+        high_price = max(open_price, close_price) * (1 + intraday_hi)
+        low_price  = min(open_price, close_price) * (1 - intraday_lo)
+
+        data.append({
+            "date":   d.strftime("%Y-%m-%d"),
+            "open":   round(open_price,  2),
+            "high":   round(high_price,  2),
+            "low":    round(low_price,   2),
+            "close":  round(close_price, 2),
+            "volume": int(avg_volume * max(0.6, np.random.normal(1.0, 0.15))),
+        })
+        prev_close = close_price
+
+    return data
+
+
+def run_single_model(tag, df_train, df_eval, df_full,
+                     avg_volume, volatility, last_date,
+                     results, accuracy, errors):
     try:
-        # Prepare data
-        df_train = df_train.copy()
-        df_train["MA5"] = df_train["Close"].rolling(5).mean()
-        df_train["MA10"] = df_train["Close"].rolling(10).mean()
-        df_train["Return"] = df_train["Close"].pct_change()
+        FEATURES = ["Close", "MA5", "MA10", "Return"]
 
-        df_train = df_train.dropna()
+        # ── Train ────────────────────────────────────────────────────────
+        train_feat = add_features(df_train)
+        X_train    = train_feat[FEATURES].values
+        y_train    = train_feat["Close"].values
 
-        X = df_train[["Close", "MA5", "MA10", "Return"]].values
-        y = df_train["Close"].values
-
-        # Choose model
+        scaler = None
         if tag == "RNN":
             model = LinearRegression()
+            model.fit(X_train, y_train)
+
         elif tag == "LSTM":
-            model = RandomForestRegressor(n_estimators=50)
-        elif tag == "GRU":
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            model = SVR()
-            model.fit(X_scaled, y)
-            scalers["GRU"] = scaler
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            model.fit(X_train, y_train)
 
-        models[tag] = model
+        else:  # GRU → SVR with StandardScaler
+            scaler   = StandardScaler()
+            X_scaled = scaler.fit_transform(X_train)
+            model    = SVR(kernel="rbf", C=100, epsilon=0.1)
+            model.fit(X_scaled, y_train)
 
-        # Train (Already handled for GRU above, others call fit here)
-        if tag != "GRU":
-            model.fit(X, y)
+        # ── Evaluate on held-out last 15 days ───────────────────────────
+        # Prepend 10 rows of training context so MA5/MA10 are properly warm.
+        context   = pd.concat([df_train.tail(10), df_eval])
+        eval_feat = add_features(context).iloc[-len(df_eval):]
 
-        # Predict next 15 days (iterative rolling forecast)
+        X_eval = eval_feat[FEATURES].values
+        y_true = eval_feat["Close"].values
+
+        y_pred = model.predict(scaler.transform(X_eval) if scaler else X_eval)
+
+        n = min(len(y_true), len(y_pred))
+        y_true, y_pred = y_true[:n], y_pred[:n]
+
+        mae  = float(mean_absolute_error(y_true, y_pred))
+        rmse = float(mean_squared_error(y_true, y_pred) ** 0.5)
+        da   = float(np.mean(np.sign(np.diff(y_true)) == np.sign(np.diff(y_pred))) * 100) if n >= 2 else 0.0
+
+        accuracy[tag] = {
+            "mae":  round(mae,  2),
+            "rmse": round(rmse, 2),
+            "da":   round(da,   1),
+        }
+
+        # ── Forecast next 15 trading days ───────────────────────────────
+        full_feat     = add_features(df_full)
+        current_input = full_feat[FEATURES].values[-1].copy()
+
         preds = []
-        current_input = X[-1].copy()
-
         for _ in range(15):
-            if tag == "GRU":
-                scaler = scalers["GRU"]
-                scaled_input = scaler.transform([current_input])
-                pred = model.predict(scaled_input)[0]
-            else:
-                pred = model.predict([current_input])[0]
+            inp  = current_input.reshape(1, -1)
+            pred = model.predict(scaler.transform(inp) if scaler else inp)[0]
             preds.append(pred)
 
-            # shift features forward
-            prev_close_val = current_input[0]
-
+            prev_val         = current_input[0]
             current_input[0] = pred
-            current_input[1] = (current_input[1]*4 + pred)/5
-            current_input[2] = (current_input[2]*9 + pred)/10
+            current_input[1] = (current_input[1] * 4 + pred) / 5
+            current_input[2] = (current_input[2] * 9 + pred) / 10
+            current_input[3] = (pred - prev_val) / prev_val if prev_val != 0 else 0
 
-            if prev_close_val != 0:
-                current_input[3] = (pred - prev_close_val) / prev_close_val
-            else:
-                current_input[3] = 0
-
-        # Format output
-        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=15, freq="B")
-
-        data = []
-        prev_close = df_train["Close"].iloc[-1]
-
-        for d, p in zip(future_dates, preds):
-            open_price = prev_close
-            close_price = p
-
-            high_price = max(open_price, close_price) * (1 + np.random.uniform(0.001, 0.01))
-            low_price = min(open_price, close_price) * (1 - np.random.uniform(0.001, 0.01))
-
-            data.append({
-                "date": d.strftime("%Y-%m-%d"),
-                "open": float(open_price),
-                "high": float(high_price),
-                "low": float(low_price),
-                "close": float(close_price),
-                "volume": int(avg_volume)
-            })
-
-            prev_close = close_price
-
-        results[tag] = data
-
-        # Compute accuracy on eval set
-        df_eval_copy = df_eval.copy()
-        df_eval_copy["MA5"] = df_eval_copy["Close"].rolling(5).mean()
-        df_eval_copy["MA10"] = df_eval_copy["Close"].rolling(10).mean()
-        df_eval_copy["Return"] = df_eval_copy["Close"].pct_change()
-        df_eval_copy = df_eval_copy.dropna()
-
-        if len(df_eval_copy) > 0:
-            X_eval = df_eval_copy[["Close", "MA5", "MA10", "Return"]].values
-            y_true = df_eval_copy["Close"].values
-
-            if tag == "GRU":
-                scaler = scalers["GRU"]
-                X_eval_scaled = scaler.transform(X_eval)
-                y_pred = model.predict(X_eval_scaled)
-            else:
-                y_pred = model.predict(X_eval)
-
-            if len(y_pred) != len(y_true):
-                min_len = min(len(y_pred), len(y_true))
-                y_pred = y_pred[:min_len]
-                y_true = y_true[:min_len]
-
-            mae = mean_absolute_error(y_true, y_pred)
-            rmse = mean_squared_error(y_true, y_pred) ** 0.5
-
-            direction = np.sign(np.diff(y_true)) == np.sign(np.diff(y_pred))
-            da = np.mean(direction) * 100 if len(direction) > 0 else 0
-
-            accuracy[tag] = {
-                "mae": float(round(mae, 2)),
-                "rmse": float(round(rmse, 2)),
-                "da": float(round(da, 2))
-            }
-        else:
-            accuracy[tag] = {"mae": 0, "rmse": 0, "da": 0}
+        results[tag] = build_future_candles(
+            preds, float(df_full["Close"].iloc[-1]),
+            last_date, avg_volume, volatility
+        )
 
     except Exception as e:
         errors[tag] = str(e)
+
+
 # ─── ROUTES ────────────────────────────────────────────────
 @app.route("/")
 def index():
@@ -215,17 +208,13 @@ def index():
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
     rows = db_fetchall("SELECT symbol, name FROM companies")
-    if DATABASE_URL:
-        stocks = [{"symbol": r["symbol"], "name": r["name"]} for r in rows]
-    else:
-        stocks = [{"symbol": s, "name": n} for s, n in rows]
-    return jsonify(stocks)
+    return jsonify([{"symbol": r["symbol"], "name": r["name"]} for r in rows])
 
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
     data   = request.json
     symbol = data.get("symbol", "").upper().strip()
-    name   = data.get("name", "").strip()
+    name   = data.get("name",   "").strip()
     if not symbol or not name:
         return jsonify({"error": "Symbol and name required"}), 400
     try:
@@ -285,7 +274,7 @@ def compare_stocks():
                 "percent": round(pct, 2),
                 "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
                 "high":    round(float(df["High"].max()), 2),
-                "low":     round(float(df["Low"].min()), 2),
+                "low":     round(float(df["Low"].min()),  2),
                 "avg_vol": int(df["Volume"].mean()),
             }
 
@@ -304,11 +293,10 @@ def predict_stock(symbol):
     try:
         df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
         if df.empty:
-            return jsonify({"error": f"No data found for {symbol}. Check the ticker symbol."}), 404
+            return jsonify({"error": f"No data found for {symbol}."}), 404
         if len(df) < 60:
             return jsonify({"error": f"Not enough historical data for {symbol}."}), 400
 
-        window     = 40
         volatility = float(df["Close"].pct_change().dropna().std())
         avg_volume = int(df["Volume"].mean())
         last_date  = df.index[-1]
@@ -318,14 +306,12 @@ def predict_stock(symbol):
         results  = {}
         accuracy = {}
         errors   = {}
-        models   = {}
-        scalers  = {}
 
         for tag in models_param:
             run_single_model(
-                tag, df_train, df_eval, df, window,
+                tag, df_train, df_eval, df,
                 avg_volume, volatility, last_date,
-                results, accuracy, errors, models, scalers
+                results, accuracy, errors
             )
 
         if not results:
@@ -387,6 +373,5 @@ def get_news(symbol):
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
