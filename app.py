@@ -6,9 +6,8 @@ import os
 import numpy as np
 import yfinance as yf
 import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.svm import SVR
+from sklearn.linear_model import Ridge
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import warnings
@@ -78,27 +77,32 @@ def df_to_records(df):
         })
     return records
 
+# Features — all lagged so no data leakage
+FEATURES = ["Lag1","Lag2","Lag3","MA5","MA10","MA20","Return1","Return5","Std5"]
+
 def add_features(df):
     """
-    Add MA5, MA10, Return — uses min_periods=1 so short eval windows
-    never produce NaN rows.
+    Lagged features only — Target = NEXT day's close.
+    No current Close in inputs, so no data leakage.
     """
     df = df.copy()
-    df["MA5"]    = df["Close"].rolling(5,  min_periods=1).mean()
-    df["MA10"]   = df["Close"].rolling(10, min_periods=1).mean()
-    df["Return"] = df["Close"].pct_change().fillna(0)
-    return df
+    df["Lag1"]    = df["Close"].shift(1)
+    df["Lag2"]    = df["Close"].shift(2)
+    df["Lag3"]    = df["Close"].shift(3)
+    df["MA5"]     = df["Close"].rolling(5,  min_periods=1).mean().shift(1)
+    df["MA10"]    = df["Close"].rolling(10, min_periods=1).mean().shift(1)
+    df["MA20"]    = df["Close"].rolling(20, min_periods=1).mean().shift(1)
+    df["Return1"] = df["Close"].pct_change(1).fillna(0).shift(1)
+    df["Return5"] = df["Close"].pct_change(5).fillna(0).shift(1)
+    df["Std5"]    = df["Close"].rolling(5,  min_periods=1).std().fillna(0).shift(1)
+    df["Target"]  = df["Close"].shift(-1)
+    return df.dropna()
+
 
 def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatility):
-    """
-    Build realistic OHLC candles from predicted close prices.
-    High/Low swing is derived from historical daily volatility so candles
-    look like real market data rather than flat lines.
-    """
     future_dates = pd.date_range(
         start=last_date + pd.Timedelta(days=1), periods=len(preds), freq="B"
     )
-    # intraday swing: use historical vol, clamp to sensible range
     swing      = max(min(hist_volatility, 0.03), 0.003)
     data       = []
     prev_close = last_close
@@ -106,13 +110,8 @@ def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatili
     for d, close_price in zip(future_dates, preds):
         close_price = float(close_price)
         open_price  = float(prev_close)
-
-        intraday_hi = np.random.uniform(0.002, swing * 1.5)
-        intraday_lo = np.random.uniform(0.002, swing * 1.5)
-
-        high_price = max(open_price, close_price) * (1 + intraday_hi)
-        low_price  = min(open_price, close_price) * (1 - intraday_lo)
-
+        high_price  = max(open_price, close_price) * (1 + np.random.uniform(0.002, swing * 1.5))
+        low_price   = min(open_price, close_price) * (1 - np.random.uniform(0.002, swing * 1.5))
         data.append({
             "date":   d.strftime("%Y-%m-%d"),
             "open":   round(open_price,  2),
@@ -122,7 +121,6 @@ def build_future_candles(preds, last_close, last_date, avg_volume, hist_volatili
             "volume": int(avg_volume * max(0.6, np.random.normal(1.0, 0.15))),
         })
         prev_close = close_price
-
     return data
 
 
@@ -130,35 +128,36 @@ def run_single_model(tag, df_train, df_eval, df_full,
                      avg_volume, volatility, last_date,
                      results, accuracy, errors):
     try:
-        FEATURES = ["Close", "MA5", "MA10", "Return"]
-
-        # ── Train ────────────────────────────────────────────────────────
+        # ── Build training features ──────────────────────────────────────
         train_feat = add_features(df_train)
         X_train    = train_feat[FEATURES].values
-        y_train    = train_feat["Close"].values
+        y_train    = train_feat["Target"].values
 
+        # Models:
+        # RNN  → Ridge regression (regularised linear, no leakage, realistic errors)
+        # LSTM → GradientBoosting (captures non-linear patterns)
+        # GRU  → RandomForest    (ensemble, different predictions from above two)
         scaler = None
         if tag == "RNN":
-            model = LinearRegression()
-            model.fit(X_train, y_train)
+            scaler = StandardScaler()
+            model  = Ridge(alpha=1.0)
+            model.fit(scaler.fit_transform(X_train), y_train)
 
         elif tag == "LSTM":
+            model = GradientBoostingRegressor(n_estimators=100, random_state=42)
+            model.fit(X_train, y_train)
+
+        else:  # GRU
             model = RandomForestRegressor(n_estimators=100, random_state=42)
             model.fit(X_train, y_train)
 
-        else:  # GRU → SVR with StandardScaler
-            scaler   = StandardScaler()
-            X_scaled = scaler.fit_transform(X_train)
-            model    = SVR(kernel="rbf", C=100, epsilon=0.1)
-            model.fit(X_scaled, y_train)
-
         # ── Evaluate on held-out last 15 days ───────────────────────────
-        # Prepend 10 rows of training context so MA5/MA10 are properly warm.
-        context   = pd.concat([df_train.tail(10), df_eval])
+        # Prepend 20 rows of training context so all rolling windows are warm
+        context   = pd.concat([df_train.tail(20), df_eval])
         eval_feat = add_features(context).iloc[-len(df_eval):]
 
         X_eval = eval_feat[FEATURES].values
-        y_true = eval_feat["Close"].values
+        y_true = eval_feat["Target"].values
 
         y_pred = model.predict(scaler.transform(X_eval) if scaler else X_eval)
 
@@ -175,21 +174,32 @@ def run_single_model(tag, df_train, df_eval, df_full,
             "da":   round(da,   1),
         }
 
-        # ── Forecast next 15 trading days ───────────────────────────────
-        full_feat     = add_features(df_full)
-        current_input = full_feat[FEATURES].values[-1].copy()
+        # ── Forecast next 15 trading days (autoregressive) ──────────────
+        full_feat  = add_features(df_full)
+        last_state = full_feat[FEATURES].values[-1].copy()
+
+        # Track last 20 closes for accurate rolling feature updates
+        hist = list(df_full["Close"].values[-20:])
 
         preds = []
         for _ in range(15):
-            inp  = current_input.reshape(1, -1)
-            pred = model.predict(scaler.transform(inp) if scaler else inp)[0]
+            inp  = last_state.reshape(1, -1)
+            pred = float(model.predict(scaler.transform(inp) if scaler else inp)[0])
             preds.append(pred)
 
-            prev_val         = current_input[0]
-            current_input[0] = pred
-            current_input[1] = (current_input[1] * 4 + pred) / 5
-            current_input[2] = (current_input[2] * 9 + pred) / 10
-            current_input[3] = (pred - prev_val) / prev_val if prev_val != 0 else 0
+            # Append prediction and recompute all lagged features
+            hist.append(pred)
+            arr = np.array(hist)
+
+            last_state[0] = arr[-2]                           # Lag1
+            last_state[1] = arr[-3]                           # Lag2
+            last_state[2] = arr[-4]                           # Lag3
+            last_state[3] = arr[-6:-1].mean()                 # MA5
+            last_state[4] = arr[-11:-1].mean() if len(arr) >= 11 else arr[:-1].mean()  # MA10
+            last_state[5] = arr[-21:-1].mean() if len(arr) >= 21 else arr[:-1].mean()  # MA20
+            last_state[6] = (arr[-2] - arr[-3]) / arr[-3] if arr[-3] != 0 else 0       # Return1
+            last_state[7] = (arr[-2] - arr[-7]) / arr[-7] if len(arr) >= 7 and arr[-7] != 0 else 0  # Return5
+            last_state[8] = arr[-6:-1].std() if len(arr) >= 6 else 0                   # Std5
 
         results[tag] = build_future_candles(
             preds, float(df_full["Close"].iloc[-1]),
