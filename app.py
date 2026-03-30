@@ -344,7 +344,7 @@ def predict_stock(symbol):
         elif dn > up:  consensus = "MAJORITY_DOWN"
         else:          consensus = "SPLIT"
 
-        best = min(accuracy, key=lambda t: accuracy[t]["rmse"])
+        best = max(accuracy, key=lambda t: accuracy[t]["da"])
 
         return jsonify({
             "actual":    actual_candles,
