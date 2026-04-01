@@ -204,11 +204,11 @@ async function addStock() {
    if (rawSymbol !== rawSymbol.toUpperCase()) {
     setStatus(status, "⚠ Ticker auto-corrected to uppercase: " + symbol, false);
     document.getElementById("add-symbol").value = symbol;
-    return;
+    
 }
 
     const KNOWN_US = ["AAPL","MSFT","GOOG","GOOGL","AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","CRM","ORCL","IBM","UBER","LYFT","SNAP","SPOT"];
-    const looksIndian = /^[A-Z]{2,15}$/.test(symbol) && !KNOWN_US.includes(symbol) && !symbol.includes(".");
+    const looksIndian = /^[A-Z]{2,15}$/.test(symbol) && !KNOWN_US.includes(symbol);
     if (looksIndian && !symbol.endsWith(".NS") && !symbol.endsWith(".BO")) {
         setStatus(status, `⚠ Is this an Indian stock? Try ${symbol}.NS (NSE) or ${symbol}.BO (BSE) instead.`, false);
         return;
