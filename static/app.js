@@ -641,28 +641,91 @@ function exportPredictionsCSV() {
     document.body.removeChild(link); URL.revokeObjectURL(url);
 }
 
+function getFaceSVG(type) {
+
+    let bg = "#ffd93d"; // yellow
+    let mouth = `<line x1="10" y1="24" x2="30" y2="24" stroke="black" stroke-width="2"/>`; // neutral
+
+    if (type === "positive") {
+        bg = "#00ff88";
+        mouth = `<path d="M10 24 Q20 32 30 24" stroke="black" stroke-width="2" fill="none"/>`;
+    } 
+    else if (type === "negative") {
+        bg = "#ff4455";
+        mouth = `<path d="M10 28 Q20 18 30 28" stroke="black" stroke-width="2" fill="none"/>`;
+    }
+
+    return `
+    <div style="
+        position:absolute;
+        top:8px;
+        right:8px;
+        width:36px;
+        height:36px;
+        border-radius:12px;
+        background:${bg};
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        box-shadow:0 0 8px ${bg}66;
+    ">
+        <svg width="26" height="26" viewBox="0 0 40 40">
+            <!-- eyes -->
+            <circle cx="14" cy="14" r="5" fill="white"/>
+            <circle cx="26" cy="14" r="5" fill="white"/>
+            <circle cx="14" cy="14" r="2.5" fill="black"/>
+            <circle cx="26" cy="14" r="2.5" fill="black"/>
+
+            <!-- mouth -->
+            ${mouth}
+        </svg>
+    </div>`;
+}
 /* ── NEWS MODULE ───────────────────────────────────────── */
 async function fetchNews(symbol, containerId) {
     const container = document.getElementById(containerId);
     if (!container) return;
+
     container.innerHTML = `<div class="spinner"></div><span style="margin-left:8px;font-size:12px;color:var(--muted)">Loading news...</span>`;
+
     try {
         const res  = await fetch(`/api/news/${symbol}`);
         const news = await res.json();
+
         if (news.error || news.length === 0) {
             container.innerHTML = `<p style="font-size:12px;color:var(--muted)">No recent news found for ${symbol}.</p>`;
             return;
         }
+
         let html = '<div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">';
+
         news.forEach(n => {
+            const face = getFaceSVG(n.sentiment);
             const d = n.pubDate ? new Date(n.pubDate).toLocaleDateString() : "Recent";
-            html += `<div style="background:var(--bg3);padding:14px;border-radius:8px;border:1px solid var(--border);">
-                <a href="${n.link}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:13px;font-weight:bold;margin-bottom:6px;display:block;">${n.title}</a>
-                <p style="color:var(--text);font-size:11px;line-height:1.5;">${n.summary}</p>
-                <div style="color:var(--muted);font-size:10px;margin-top:8px;">${d}</div></div>`;
+
+            html += `
+            <div style="position:relative;background:var(--bg3);padding:14px;border-radius:8px;border:1px solid var(--border);">
+
+                ${face}
+
+                <a href="${n.link}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:13px;font-weight:bold;margin-bottom:6px;display:block;">
+                    ${n.title}
+                </a>
+
+                <p style="color:var(--text);font-size:11px;line-height:1.5;">
+                    ${n.summary}
+                </p>
+
+                <div style="color:var(--muted);font-size:10px;margin-top:8px;">
+                    ${d}
+                </div>
+
+            </div>`;
         });
+
         html += "</div>";
         container.innerHTML = html;
+
     } catch (e) {
         container.innerHTML = `<p style="font-size:12px;color:var(--red)">❌ Failed to load news for ${symbol}.</p>`;
     }

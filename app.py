@@ -64,6 +64,23 @@ def init_db():
 init_db()
 
 
+def analyze_sentiment(text):
+    text = text.lower()
+
+    pos_words = ["gain","profit","rise","growth","surge","strong","beat","record"]
+    neg_words = ["loss","fall","drop","decline","weak","miss","crash","down"]
+
+    pos = sum(word in text for word in pos_words)
+    neg = sum(word in text for word in neg_words)
+
+    if pos > neg:
+        return "positive"
+    elif neg > pos:
+        return "negative"
+    else:
+        return "neutral"
+
+
 # ─── HELPERS ───────────────────────────────────────────────
 def clean_ohlcv(df):
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
