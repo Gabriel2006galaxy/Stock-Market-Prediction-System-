@@ -11,18 +11,24 @@ from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import warnings
+import difflib
+
 
 warnings.filterwarnings("ignore")
 
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
 
 app = Flask(__name__)
 CORS(app)
+
 
 def get_db():
     if not DATABASE_URL:
         raise Exception("DATABASE_URL not set in environment.")
     return psycopg2.connect(DATABASE_URL, sslmode="require")
+
 
 def db_fetchall(query, params=()):
     conn = get_db()
@@ -32,12 +38,14 @@ def db_fetchall(query, params=()):
     conn.close()
     return rows
 
+
 def db_execute(query, params=()):
     conn = get_db()
     cur  = conn.cursor()
     cur.execute(query, params)
     conn.commit()
     conn.close()
+
 
 def init_db():
     conn = get_db()
@@ -51,7 +59,9 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
+
 
 # ─── HELPERS ───────────────────────────────────────────────
 def clean_ohlcv(df):
@@ -63,6 +73,7 @@ def clean_ohlcv(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna()
+
 
 def df_to_records(df):
     records = []
@@ -77,37 +88,54 @@ def df_to_records(df):
         })
     return records
 
-def validate_ticker_exists(symbol):
+
+def find_suggestion(user_symbol, known_symbols):
     """
-    Returns (True, None) if ticker seems valid,
-    or (False, error_message) if not.
+    Given user‑typed symbol and list of known symbols, returns (suggested_symbol, suggested_name)
+    or None if no good match.
     """
-    try:
-        ticker_obj = yf.Ticker(symbol)
-        info = ticker_obj.info
-        # yfinance returns a minimal dict with just 'trailingPegRatio' for unknown tickers
-        if not info or len(info) <= 1:
-            # Give a specific hint for Indian stocks without suffix
-            upper = symbol.upper()
-            if "." not in upper:
-                return False, (
-                    f"'{symbol}' not found. "
-                    f"If this is an Indian stock, try '{upper}.NS' (NSE) or '{upper}.BO' (BSE). "
-                    f"US stocks need no suffix (e.g. AAPL, MSFT)."
-                )
-            elif upper.endswith(".NS") or upper.endswith(".BO"):
-                return False, (
-                    f"'{symbol}' not found on {'NSE' if upper.endswith('.NS') else 'BSE'}. "
-                    f"Double-check the ticker spelling."
-                )
-            else:
-                return False, f"'{symbol}' not found. Please check the ticker symbol."
-        return True, None
-    except Exception as e:
-        return False, f"Could not verify ticker '{symbol}': {str(e)}"
+    if not known_symbols:
+        return None
+    upper = user_symbol.upper().strip()
+    if not upper:
+        return None
+
+    # 1) exact match
+    for s in known_symbols:
+        if upper == s["symbol"].upper():
+            return s["symbol"], s.get("name", s["symbol"])
+    # 2) fuzzy match on symbol
+    # Build list of symbols that are NOT already in the watchlist
+    watched_syms = {s["symbol"].upper() for s in known_symbols}
+    candidates   = [s for s in known_symbols
+            if s["symbol"].upper() not in watched_syms]
+
+# 2) fuzzy match on symbol
+    choices = [s["symbol"] for s in candidates]
+    matches = difflib.get_close_matches(upper, choices, n=1, cutoff=0.3)
+    if matches:
+
+        sym = matches[0]
+        s   = next((s for s in candidates if s["symbol"] == sym), None)
+        if s:
+            name = s.get("name", "Company")
+            return sym, name
+    return None
+
+# Common fallback stocks if DB is empty
+COMMON_TICKERS = [
+    {"symbol": "AAPL", "name": "Apple Inc."},
+    {"symbol": "MSFT", "name": "Microsoft Corp."},
+    {"symbol": "GOOGL", "name": "Alphabet Inc."},
+    {"symbol": "AMZN", "name": "Amazon.com Inc."},
+    {"symbol": "TSLA", "name": "Tesla Inc."},
+    {"symbol": "NVDA", "name": "NVIDIA Corp."},
+]
+
 
 # Features — all lagged so no data leakage
 FEATURES = ["Lag1","Lag2","Lag3","MA5","MA10","MA20","Return1","Return5","Std5"]
+
 
 def add_features(df):
     df = df.copy()
@@ -199,7 +227,7 @@ def run_single_model(tag, df_train, df_eval, df_full,
         preds = []
         for _ in range(15):
             inp  = last_state.reshape(1, -1)
-            pred = float(model.predict(scaler.transform(inp) if scaler else inp)[0])
+            pred = float(model.predict(scaler.transform(inp) if scaler else X_eval)[0])
             preds.append(pred)
 
             hist.append(pred)
@@ -222,23 +250,25 @@ def run_single_model(tag, df_train, df_eval, df_full,
 
     except Exception as e:
         errors[tag] = str(e)
-
-
-# ─── ROUTES ────────────────────────────────────────────────
+# ┬────────────────────────────────────────────────────
+# │ ROUTES
+# ┴────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 @app.route("/api/stocks", methods=["GET"])
 def get_stocks():
     rows = db_fetchall("SELECT symbol, name FROM companies")
     return jsonify([{"symbol": r["symbol"], "name": r["name"]} for r in rows])
 
+
 @app.route("/api/stocks", methods=["POST"])
 def add_stock():
     data   = request.json
     symbol = data.get("symbol", "").upper().strip()
-    name   = data.get("name",   "").strip()
+    name   = data.get("name", "").strip()
 
     if not symbol:
         return jsonify({"error": "Ticker symbol is required."}), 400
@@ -246,6 +276,32 @@ def add_stock():
         return jsonify({"error": "Company name is required."}), 400
     if " " in symbol:
         return jsonify({"error": f"Ticker '{symbol}' contains spaces. Please remove them."}), 400
+
+    # Optional: flag likely Indian stock without .NS / .BO
+    KNOWN_US = ["AAPL","MSFT","GOOG","GOOGL","AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","CRM","ORCL","IBM","UBER","LYFT","SNAP","SPOT"]
+    looksIndian = bool(re.match(r"^[A-Z]{2,15}$", symbol)) and \
+                  (not "." in symbol) and \
+                  (not symbol in KNOWN_US)
+    if looksIndian:
+        return jsonify({"error": f"'{symbol}' looks like an Indian stock. Try {symbol}.NS or {symbol}.BO."}), 400
+
+    # Check if symbol actually exists in yfinance
+    try:
+        df = yf.download(symbol, period="1d", progress=False)
+        if df.empty:
+            db_stocks = db_fetchall("SELECT symbol, name FROM companies")
+            known = db_stocks if db_stocks else COMMON_TICKERS
+            suggestion = find_suggestion(symbol, known)
+            if suggestion:
+                s_sym, s_name = suggestion
+                return jsonify({
+                    "error": f"Invalid stock symbol '{symbol}'",
+                    "suggestion": f"{s_sym} ({s_name})"
+                }), 404
+            else:
+                return jsonify({"error": f"No price data found for '{symbol}'."}), 404
+    except Exception as e:
+        return jsonify({"error": f"Could not verify ticker '{symbol}': {str(e)}"}), 500
 
     try:
         db_execute(
@@ -256,33 +312,48 @@ def add_stock():
     except Exception as e:
         return jsonify({"error": f"Could not save stock: {str(e)}"}), 409
 
+
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
     db_execute("DELETE FROM companies WHERE symbol=%s", (symbol.upper(),))
     return jsonify({"success": True})
+
 
 @app.route("/api/stocks/all", methods=["DELETE"])
 def delete_all_stocks():
     db_execute("DELETE FROM companies")
     return jsonify({"success": True})
 
+
 @app.route("/api/view/<symbol>")
 def view_stock(symbol):
-    symbol = symbol.upper()
+    symbol = symbol.upper().strip()
+    if not symbol:
+        return jsonify({"error": "Ticker symbol required."}), 400
+
     try:
         df = yf.download(symbol, period="3mo", auto_adjust=False, progress=False)
         df = clean_ohlcv(df)
 
         if df.empty:
-            # Try to give a specific reason
-            valid, err_msg = validate_ticker_exists(symbol)
-            if not valid:
-                return jsonify({"error": err_msg}), 404
-            return jsonify({"error": f"No price data available for '{symbol}'. It may be newly listed or delisted."}), 404
+            # Build from DB + fallback
+            db_stocks = db_fetchall("SELECT symbol, name FROM companies")
+            known = db_stocks if db_stocks else COMMON_TICKERS
+            suggestion = find_suggestion(symbol, known)
+
+            if suggestion:
+                s_sym, s_name = suggestion
+                return jsonify({
+                    "error": f"Invalid stock symbol '{symbol}'",
+                    "suggestion": f"{s_sym} ({s_name})"
+                }), 404
+            else:
+                return jsonify({"error": f"No price data available for '{symbol}'."}), 404
 
         records = df_to_records(df.tail(60))
-        chg     = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
-        pct     = (chg / float(df["Close"].iloc[0])) * 100
+        chg = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
+        pct = (chg / float(df["Close"].iloc[0])) * 100
+
         return jsonify({
             "candles": records,
             "trend":   "up" if chg > 0 else ("down" if chg < 0 else "flat"),
@@ -291,6 +362,7 @@ def view_stock(symbol):
         })
     except Exception as e:
         return jsonify({"error": f"Failed to load data for '{symbol}': {str(e)}"}), 500
+
 
 @app.route("/api/compare")
 def compare_stocks():
@@ -330,9 +402,13 @@ def compare_stocks():
     except Exception as e:
         return jsonify({"error": f"Comparison failed: {str(e)}"}), 500
 
+
 @app.route("/api/predict/<symbol>")
 def predict_stock(symbol):
-    symbol = symbol.upper()
+    symbol = symbol.upper().strip()
+    if not symbol:
+        return jsonify({"error": "Ticker symbol required."}), 400
+
     models_param = request.args.get("models", "RNN,LSTM,GRU").split(",")
     models_param = [m.strip().upper() for m in models_param
                     if m.strip().upper() in ("RNN", "LSTM", "GRU")]
@@ -343,10 +419,19 @@ def predict_stock(symbol):
         df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
 
         if df.empty:
-            valid, err_msg = validate_ticker_exists(symbol)
-            if not valid:
-                return jsonify({"error": err_msg}), 404
-            return jsonify({"error": f"No price data available for '{symbol}'. It may be newly listed or delisted."}), 404
+            # Build from DB + fallback
+            db_stocks = db_fetchall("SELECT symbol, name FROM companies")
+            known = db_stocks if db_stocks else COMMON_TICKERS
+            suggestion = find_suggestion(symbol, known)
+
+            if suggestion:
+                s_sym, s_name = suggestion
+                return jsonify({
+                    "error": f"Invalid stock symbol '{symbol}'",
+                    "suggestion": f"{s_sym} ({s_name})"
+                }), 404
+            else:
+                return jsonify({"error": f"No price data available for '{symbol}'."}), 404
 
         if len(df) < 60:
             return jsonify({
@@ -388,11 +473,16 @@ def predict_stock(symbol):
         up = votes.count("UP")
         dn = votes.count("DOWN")
         n  = len(results)
-        if up == n:    consensus = "ALL_UP"
-        elif dn == n:  consensus = "ALL_DOWN"
-        elif up > dn:  consensus = "MAJORITY_UP"
-        elif dn > up:  consensus = "MAJORITY_DOWN"
-        else:          consensus = "SPLIT"
+        if up == n:
+            consensus = "ALL_UP"
+        elif dn == n:
+            consensus = "ALL_DOWN"
+        elif up > dn:
+            consensus = "MAJORITY_UP"
+        elif dn > up:
+            consensus = "MAJORITY_DOWN"
+        else:
+            consensus = "SPLIT"
 
         best = max(accuracy, key=lambda t: accuracy[t]["da"])
 
@@ -407,6 +497,7 @@ def predict_stock(symbol):
 
     except Exception as e:
         return jsonify({"error": f"Prediction failed for '{symbol}': {str(e)}"}), 500
+
 
 @app.route("/api/news/<symbol>")
 def get_news(symbol):
@@ -429,11 +520,16 @@ def get_news(symbol):
                 link    = n.get("link", "")
                 summary = n.get("summary", "")
                 pub     = n.get("providerPublishTime", "")
-            cleaned.append({"title": title, "link": link,
-                            "summary": summary, "pubDate": str(pub)})
+            cleaned.append({
+                "title": title,
+                "link": link,
+                "summary": summary,
+                "pubDate": str(pub)
+            })
         return jsonify(cleaned)
     except Exception as e:
         return jsonify({"error": f"Could not fetch news for '{symbol}': {str(e)}"}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

@@ -218,29 +218,33 @@ async function addStock() {
     }
 
     try {
-        const res  = await fetch("/api/stocks", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name, symbol })
-        });
-        const data = await res.json();
-        if (data.error) {
-            if (data.error.includes("duplicate") || data.error.includes("already")) {
-                setStatus(status, `❌ ${symbol} is already in your watchlist.`, false);
-            } else {
-                setStatus(status, "❌ " + data.error, false);
-            }
-        } else {
-            setStatus(status, `✅ ${data.name} (${data.symbol}) added!`, true);
-            document.getElementById("add-name").value = "";
-            document.getElementById("add-symbol").value = "";
-            await loadStocks();
-            document.getElementById("stat-total-val").textContent = stocks.length;
-            toast("Stock added successfully", true);
+    const res  = await fetch("/api/stocks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, symbol })
+    });
+    const data = await res.json();
+    if (data.error) {
+        let msg = data.error;
+        if (data.suggestion) {
+            msg += ` — Did you mean: ${data.suggestion}?`;
         }
-    } catch (e) {
-        setStatus(status, "❌ Server error. Please try again.", false);
+
+        if (msg.includes("duplicate") || msg.includes("already")) {
+            setStatus(status, `❌ ${symbol} is already in your watchlist.`, false);
+        } else {
+            setStatus(status, "❌ " + msg, false);
+        }
+    } else {
+        setStatus(status, `✅ ${data.name} (${data.symbol}) added!`, true);
+        document.getElementById("add-name").value = "";
+        document.getElementById("add-symbol").value = "";
+        await loadStocks();
+        document.getElementById("stat-total-val").textContent = stocks.length;
+        toast("Stock added successfully", true);
     }
+} catch (e) {
+    setStatus(status, "❌ Server error. Please try again.", false);
 }
 
 /* ── ALL STOCKS ────────────────────────────────────────── */
