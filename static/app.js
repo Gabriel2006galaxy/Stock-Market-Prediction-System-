@@ -184,8 +184,7 @@ async function addStock() {
     const name      = document.getElementById("add-name").value.trim();
     const rawSymbol = document.getElementById("add-symbol").value.trim();
     const status    = document.getElementById("add-status");
-
-    // ── Client-side validation ──────────────────────────
+    
     if (!name) {
         setStatus(status, "⚠ Please enter the company name.", false); return;
     }
@@ -202,50 +201,48 @@ async function addStock() {
         setStatus(status, "❌ Ticker has invalid characters. Use letters, numbers, dots or hyphens only.", false); return;
     }
 
-    // Warn if user typed lowercase or forgot .NS/.BO
-    if (rawSymbol !== rawSymbol.toUpperCase()) {
-        setStatus(status, "⚠ Ticker auto-corrected to uppercase: " + symbol, false);
-        document.getElementById("add-symbol").value = symbol;
-        // Don't block — just warn and continue
-    }
-
-    // Detect likely Indian stock without suffix
+   if (rawSymbol !== rawSymbol.toUpperCase()) {
+    setStatus(status, "⚠ Ticker auto-corrected to uppercase: " + symbol, false);
+    document.getElementById("add-symbol").value = symbol;
+    return;
+}
+}
     const KNOWN_US = ["AAPL","MSFT","GOOG","GOOGL","AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","CRM","ORCL","IBM","UBER","LYFT","SNAP","SPOT"];
     const looksIndian = /^[A-Z]{2,15}$/.test(symbol) && !KNOWN_US.includes(symbol) && !symbol.includes(".");
-    if (looksIndian) {
+    if (looksIndian && !symbol.endsWith(".NS") && !symbol.endsWith(".BO")) {
         setStatus(status, `⚠ Is this an Indian stock? Try ${symbol}.NS (NSE) or ${symbol}.BO (BSE) instead.`, false);
         return;
     }
 
     try {
-    const res  = await fetch("/api/stocks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, symbol })
-    });
-    const data = await res.json();
-    if (data.error) {
-        let msg = data.error;
-        if (data.suggestion) {
-            msg += ` — Did you mean: ${data.suggestion}?`;
-        }
-
-        if (msg.includes("duplicate") || msg.includes("already")) {
-            setStatus(status, `❌ ${symbol} is already in your watchlist.`, false);
+        const res = await fetch("/api/stocks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, symbol })
+        });
+        const data = await res.json();
+        if (data.error) {
+            let msg = data.error;
+            if (data.suggestion) {
+                msg += ` — Did you mean: ${data.suggestion}?`;
+            }
+            if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("already")) {
+                setStatus(status, `❌ ${symbol} is already in your watchlist.`, false);
+            } else {
+                setStatus(status, "❌ " + msg, false);
+            }
         } else {
-            setStatus(status, "❌ " + msg, false);
+            setStatus(status, `✅ ${data.name} (${data.symbol}) added!`, true);
+            document.getElementById("add-name").value = "";
+            document.getElementById("add-symbol").value = "";
+            await loadStocks();
+            document.getElementById("stat-total-val").textContent = stocks.length;
+            toast("Stock added successfully", true);
         }
-    } else {
-        setStatus(status, `✅ ${data.name} (${data.symbol}) added!`, true);
-        document.getElementById("add-name").value = "";
-        document.getElementById("add-symbol").value = "";
-        await loadStocks();
-        document.getElementById("stat-total-val").textContent = stocks.length;
-        toast("Stock added successfully", true);
+    } catch (e) {
+        setStatus(status, "❌ Server error. Please try again.", false);
     }
-} catch (e) {
-    setStatus(status, "❌ Server error. Please try again.", false);
-}
+
 
 /* ── ALL STOCKS ────────────────────────────────────────── */
 function renderAllStocks() {
@@ -704,5 +701,4 @@ async function renderMarketNews() {
     });
     html += "</div>";
     container.innerHTML = html;
-}
 }
