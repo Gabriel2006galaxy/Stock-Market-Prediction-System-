@@ -305,9 +305,10 @@ def add_stock():
         return jsonify({"error": f"Could not verify ticker '{symbol}': {str(e)}"}), 500
     
     # 🔥 CHECK IF STOCK ALREADY EXISTS
-    existing = db_execute(
+    existing = db_fetchall(
     "SELECT * FROM companies WHERE symbol = %s",
-    (symbol,)).fetchone()
+    (symbol,))
+
     if existing:
         return jsonify({"error": "Stock already there"}), 400
 
