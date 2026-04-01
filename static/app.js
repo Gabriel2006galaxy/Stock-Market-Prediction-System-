@@ -184,7 +184,7 @@ async function addStock() {
     const name      = document.getElementById("add-name").value.trim();
     const rawSymbol = document.getElementById("add-symbol").value.trim();
     const status    = document.getElementById("add-status");
-    
+
     if (!name) {
         setStatus(status, "⚠ Please enter the company name.", false); return;
     }
@@ -206,7 +206,7 @@ async function addStock() {
     document.getElementById("add-symbol").value = symbol;
     return;
 }
-}
+
     const KNOWN_US = ["AAPL","MSFT","GOOG","GOOGL","AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","CRM","ORCL","IBM","UBER","LYFT","SNAP","SPOT"];
     const looksIndian = /^[A-Z]{2,15}$/.test(symbol) && !KNOWN_US.includes(symbol) && !symbol.includes(".");
     if (looksIndian && !symbol.endsWith(".NS") && !symbol.endsWith(".BO")) {
@@ -242,6 +242,7 @@ async function addStock() {
     } catch (e) {
         setStatus(status, "❌ Server error. Please try again.", false);
     }
+}
 
 
 /* ── ALL STOCKS ────────────────────────────────────────── */
