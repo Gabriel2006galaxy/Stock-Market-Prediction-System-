@@ -1083,3 +1083,91 @@ body {
         padding: 20px
     }
 }
+/* ── SEARCHABLE SELECT ───────────────────────────────────
+   Add this block to the END of your style.css file
+──────────────────────────────────────────────────────── */
+
+.search-select-wrap {
+    position: relative;
+    width: 100%;
+}
+
+.ss-input {
+    width: 100%;
+    cursor: text;
+}
+
+.ss-input::placeholder {
+    color: var(--muted);
+}
+
+.ss-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: var(--bg2);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    z-index: 9999;
+    max-height: 240px;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.ss-dropdown::-webkit-scrollbar { width: 4px; }
+.ss-dropdown::-webkit-scrollbar-track { background: var(--bg2); }
+.ss-dropdown::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 2px; }
+
+.ss-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+}
+
+.ss-item:last-child {
+    border-bottom: none;
+}
+
+.ss-item:hover {
+    background: rgba(0, 229, 255, 0.06);
+}
+
+.ss-sym {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    min-width: 100px;
+    flex-shrink: 0;
+}
+
+.ss-name {
+    font-size: 12px;
+    color: var(--muted);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ss-badge {
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid;
+    opacity: 0.8;
+    flex-shrink: 0;
+    letter-spacing: 0.05em;
+}
+
+.ss-empty {
+    padding: 14px;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+}

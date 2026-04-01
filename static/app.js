@@ -6,6 +6,15 @@ let cmpChart2 = null;
 let predCharts = {};
 let predActChart = null;
 
+// Tracks the currently selected symbol for each searchable selector
+let selectedSymbols = {
+    view: "",
+    cmpS1: "",
+    cmpS2: "",
+    pred: "",
+    del: ""
+};
+
 const COLORS = { RNN: "#ff6b35", LSTM: "#7b2fff", GRU: "#00d4aa" };
 
 /* ── INIT ──────────────────────────────────────────────── */
@@ -14,6 +23,12 @@ document.addEventListener("DOMContentLoaded", () => {
     initNav();
     document.getElementById("hamburger").addEventListener("click", () => {
         document.getElementById("sidebar").classList.toggle("open");
+    });
+    // Close any open dropdowns when clicking outside
+    document.addEventListener("click", (e) => {
+        if (!e.target.closest(".search-select-wrap")) {
+            document.querySelectorAll(".ss-dropdown").forEach(d => d.classList.add("hidden"));
+        }
     });
 });
 
@@ -57,37 +72,164 @@ async function loadStocks() {
     } catch (e) { console.error(e); }
 }
 
-function populateSelects() {
-    const selects = ["view-select", "cmp-s1", "cmp-s2", "pred-select", "del-select"];
-    selects.forEach(id => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        const cur = el.value;
-        el.innerHTML = '<option value="">— Select a stock —</option>';
-        stocks.forEach(s => {
-            const opt = document.createElement("option");
-            opt.value = s.symbol;
-            opt.textContent = `${s.name} (${s.symbol})`;
-            el.appendChild(opt);
-        });
-        el.value = cur;
+/* ── SEARCHABLE SELECT ─────────────────────────────────────
+   Each selector has:
+     - a text input where the user types to filter
+     - a dropdown div that shows matching stocks
+     - a hidden selected value tracked in selectedSymbols{}
+   
+   Usage: buildSearchSelect("my-wrap-id", "view")
+   Then read: selectedSymbols["view"]
+────────────────────────────────────────────────────────── */
+function buildSearchSelect(wrapId, key, placeholder) {
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return;
+    wrap.classList.add("search-select-wrap");
+    wrap.innerHTML = `
+        <input 
+            type="text" 
+            class="ss-input styled-select" 
+            id="ss-input-${key}" 
+            placeholder="${placeholder || '— Type to search stock —'}"
+            autocomplete="off"
+        />
+        <div class="ss-dropdown hidden" id="ss-drop-${key}"></div>
+        <div class="ss-selected hidden" id="ss-selected-${key}"></div>
+    `;
+    const input = document.getElementById(`ss-input-${key}`);
+    const drop  = document.getElementById(`ss-drop-${key}`);
+
+    input.addEventListener("input", () => {
+        const q = input.value.trim().toLowerCase();
+        renderDropdown(key, q);
+        drop.classList.remove("hidden");
     });
+
+    input.addEventListener("focus", () => {
+        const q = input.value.trim().toLowerCase();
+        renderDropdown(key, q);
+        drop.classList.remove("hidden");
+    });
+}
+
+function renderDropdown(key, query) {
+    const drop = document.getElementById(`ss-drop-${key}`);
+    if (!drop) return;
+
+    const filtered = query
+        ? stocks.filter(s =>
+            s.symbol.toLowerCase().includes(query) ||
+            s.name.toLowerCase().includes(query))
+        : stocks;
+
+    if (!filtered.length) {
+        drop.innerHTML = `<div class="ss-empty">No stocks match "${query}"</div>`;
+        return;
+    }
+
+    drop.innerHTML = filtered.map(s => {
+        const exchange = s.symbol.endsWith(".NS") ? "NSE"
+                       : s.symbol.endsWith(".BO") ? "BSE" : "US";
+        const badgeColor = exchange === "NSE" ? "var(--accent)"
+                         : exchange === "BSE" ? "var(--accent3)" : "var(--accent2)";
+        return `
+            <div class="ss-item" onclick="selectStock('${key}', '${s.symbol}', '${s.name.replace(/'/g, "\\'")}')">
+                <span class="ss-sym">${s.symbol}</span>
+                <span class="ss-name">${s.name}</span>
+                <span class="ss-badge" style="color:${badgeColor};border-color:${badgeColor}">${exchange}</span>
+            </div>
+        `;
+    }).join("");
+}
+
+function selectStock(key, symbol, name) {
+    selectedSymbols[key] = symbol;
+    const input = document.getElementById(`ss-input-${key}`);
+    const drop  = document.getElementById(`ss-drop-${key}`);
+    if (input) input.value = `${symbol} — ${name}`;
+    if (drop)  drop.classList.add("hidden");
+}
+
+function clearSearchSelect(key) {
+    selectedSymbols[key] = "";
+    const input = document.getElementById(`ss-input-${key}`);
+    if (input) input.value = "";
+}
+
+function populateSelects() {
+    // Build each searchable select if not already built
+    // view page
+    if (!document.getElementById("ss-input-view")) {
+        buildSearchSelect("view-select-wrap", "view", "— Type to search stock —");
+    }
+    // compare page
+    if (!document.getElementById("ss-input-cmpS1")) {
+        buildSearchSelect("cmp-s1-wrap", "cmpS1", "— First stock —");
+    }
+    if (!document.getElementById("ss-input-cmpS2")) {
+        buildSearchSelect("cmp-s2-wrap", "cmpS2", "— Second stock —");
+    }
+    // predict page
+    if (!document.getElementById("ss-input-pred")) {
+        buildSearchSelect("pred-select-wrap", "pred", "— Type to search stock —");
+    }
+    // manage page
+    if (!document.getElementById("ss-input-del")) {
+        buildSearchSelect("del-select-wrap", "del", "— Select a stock to delete —");
+    }
 }
 
 /* ── ADD STOCK ─────────────────────────────────────────── */
 async function addStock() {
-    const name   = document.getElementById("add-name").value.trim();
-    const symbol = document.getElementById("add-symbol").value.trim();
-    const status = document.getElementById("add-status");
-    if (!name || !symbol) { setStatus(status, "⚠ Please fill in both fields.", false); return; }
+    const name      = document.getElementById("add-name").value.trim();
+    const rawSymbol = document.getElementById("add-symbol").value.trim();
+    const status    = document.getElementById("add-status");
+
+    // ── Client-side validation ──────────────────────────
+    if (!name) {
+        setStatus(status, "⚠ Please enter the company name.", false); return;
+    }
+    if (!rawSymbol) {
+        setStatus(status, "⚠ Please enter a ticker symbol.", false); return;
+    }
+
+    const symbol = rawSymbol.toUpperCase();
+
+    if (/\s/.test(symbol)) {
+        setStatus(status, "❌ Ticker cannot contain spaces. Example: INFY.NS", false); return;
+    }
+    if (!/^[A-Z0-9.\-&^]+$/.test(symbol)) {
+        setStatus(status, "❌ Ticker has invalid characters. Use letters, numbers, dots or hyphens only.", false); return;
+    }
+
+    // Warn if user typed lowercase or forgot .NS/.BO
+    if (rawSymbol !== rawSymbol.toUpperCase()) {
+        setStatus(status, "⚠ Ticker auto-corrected to uppercase: " + symbol, false);
+        document.getElementById("add-symbol").value = symbol;
+        // Don't block — just warn and continue
+    }
+
+    // Detect likely Indian stock without suffix
+    const KNOWN_US = ["AAPL","MSFT","GOOG","GOOGL","AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","CRM","ORCL","IBM","UBER","LYFT","SNAP","SPOT"];
+    const looksIndian = /^[A-Z]{2,15}$/.test(symbol) && !KNOWN_US.includes(symbol) && !symbol.includes(".");
+    if (looksIndian) {
+        setStatus(status, `⚠ Is this an Indian stock? Try ${symbol}.NS (NSE) or ${symbol}.BO (BSE) instead.`, false);
+        return;
+    }
+
     try {
         const res  = await fetch("/api/stocks", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, symbol })
         });
         const data = await res.json();
         if (data.error) {
-            setStatus(status, "❌ " + data.error, false);
+            if (data.error.includes("duplicate") || data.error.includes("already")) {
+                setStatus(status, `❌ ${symbol} is already in your watchlist.`, false);
+            } else {
+                setStatus(status, "❌ " + data.error, false);
+            }
         } else {
             setStatus(status, `✅ ${data.name} (${data.symbol}) added!`, true);
             document.getElementById("add-name").value = "";
@@ -96,7 +238,9 @@ async function addStock() {
             document.getElementById("stat-total-val").textContent = stocks.length;
             toast("Stock added successfully", true);
         }
-    } catch (e) { setStatus(status, "❌ Server error.", false); }
+    } catch (e) {
+        setStatus(status, "❌ Server error. Please try again.", false);
+    }
 }
 
 /* ── ALL STOCKS ────────────────────────────────────────── */
@@ -118,7 +262,10 @@ function renderAllStocks() {
             <div class="stock-tile-name">${s.name}</div>`;
         tile.addEventListener("click", () => {
             switchPage("view");
-            setTimeout(() => { document.getElementById("view-select").value = s.symbol; loadView(); }, 50);
+            setTimeout(() => {
+                selectStock("view", s.symbol, s.name);
+                loadView();
+            }, 50);
         });
         grid.appendChild(tile);
     });
@@ -126,13 +273,17 @@ function renderAllStocks() {
 
 /* ── VIEW STOCK ────────────────────────────────────────── */
 async function loadView() {
-    const symbol = document.getElementById("view-select").value;
-    if (!symbol) { toast("Please select a stock", false); return; }
+    const symbol = selectedSymbols.view;
+    if (!symbol) { toast("⚠ Please select a stock first", false); return; }
     show("view-loader"); hide("view-result");
     try {
         const res  = await fetch(`/api/view/${symbol}`);
         const data = await res.json();
-        if (data.error) { toast(data.error, false); hide("view-loader"); return; }
+        if (data.error) {
+            toast("❌ " + data.error, false);
+            hide("view-loader");
+            return;
+        }
         hide("view-loader"); show("view-result");
         fetchNews(symbol, "view-news");
         const stock = stocks.find(s => s.symbol === symbol) || { name: symbol };
@@ -163,25 +314,33 @@ async function loadView() {
                 <td>${c.low.toFixed(2)}</td><td class="${chg>=0?"up-val":"down-val"}">${c.close.toFixed(2)}</td>
                 <td>${c.volume.toLocaleString()}</td></tr>`);
         });
-    } catch (e) { hide("view-loader"); toast("Failed to load stock data", false); }
+    } catch (e) {
+        hide("view-loader");
+        toast("❌ Failed to load stock data. Please try again.", false);
+    }
 }
 
 /* ── COMPARE ───────────────────────────────────────────── */
 async function compareStocks() {
-    const s1 = document.getElementById("cmp-s1").value;
-    const s2 = document.getElementById("cmp-s2").value;
-    if (!s1 || !s2) { toast("Select both stocks", false); return; }
-    if (s1 === s2)  { toast("Please select two different stocks", false); return; }
+    const s1 = selectedSymbols.cmpS1;
+    const s2 = selectedSymbols.cmpS2;
+    if (!s1 && !s2) { toast("⚠ Please select both stocks to compare", false); return; }
+    if (!s1)        { toast("⚠ Please select the first stock", false); return; }
+    if (!s2)        { toast("⚠ Please select the second stock", false); return; }
+    if (s1 === s2)  { toast("⚠ Please select two different stocks", false); return; }
     show("cmp-loader"); hide("cmp-result");
     try {
         const res  = await fetch(`/api/compare?s1=${s1}&s2=${s2}`);
         const data = await res.json();
-        if (data.error) { toast(data.error, false); hide("cmp-loader"); return; }
+        if (data.error) { toast("❌ " + data.error, false); hide("cmp-loader"); return; }
         hide("cmp-loader"); show("cmp-result");
         fetchNews(s1, "cmp-news-1"); fetchNews(s2, "cmp-news-2");
         renderComparePanel("cmp-chart-1","cmp-label-1","cmp-stats-1",s1,data.stock1,"#00d4aa",cmpChart1,c=>cmpChart1=c);
         renderComparePanel("cmp-chart-2","cmp-label-2","cmp-stats-2",s2,data.stock2,"#ff6b35",cmpChart2,c=>cmpChart2=c);
-    } catch (e) { hide("cmp-loader"); toast("Failed to load comparison", false); }
+    } catch (e) {
+        hide("cmp-loader");
+        toast("❌ Failed to load comparison. Please try again.", false);
+    }
 }
 
 function renderComparePanel(chartId, labelId, statsId, symbol, data, color, oldChart, setChart) {
@@ -217,14 +376,14 @@ function renderComparePanel(chartId, labelId, statsId, symbol, data, color, oldC
 
 /* ── PREDICT ───────────────────────────────────────────── */
 async function runPrediction() {
-    const symbol = document.getElementById("pred-select").value;
-    if (!symbol) { toast("Please select a stock", false); return; }
+    const symbol = selectedSymbols.pred;
+    if (!symbol) { toast("⚠ Please select a stock first", false); return; }
 
     const selected = [];
     if (document.getElementById("use-rnn").checked)  selected.push("RNN");
     if (document.getElementById("use-lstm").checked) selected.push("LSTM");
     if (document.getElementById("use-gru").checked)  selected.push("GRU");
-    if (!selected.length) { toast("Select at least one algorithm", false); return; }
+    if (!selected.length) { toast("⚠ Select at least one algorithm", false); return; }
 
     show("pred-loader"); hide("pred-result");
     document.getElementById("pred-btn").disabled = true;
@@ -399,9 +558,9 @@ function renderPrediction(data, selected, symbol) {
 
 /* ── DELETE ────────────────────────────────────────────── */
 async function deleteStock() {
-    const symbol = document.getElementById("del-select").value;
+    const symbol = selectedSymbols.del;
     const status = document.getElementById("del-status");
-    if (!symbol) { setStatus(status, "⚠ Select a stock first.", false); return; }
+    if (!symbol) { setStatus(status, "⚠ Please select a stock first.", false); return; }
     if (!confirm(`Delete ${symbol} from your watchlist?`)) return;
     try {
         const res  = await fetch(`/api/stocks/${symbol}`, { method: "DELETE" });
@@ -409,9 +568,13 @@ async function deleteStock() {
         if (data.success) {
             toast(`${symbol} deleted`, true);
             setStatus(status, `✅ ${symbol} deleted.`, true);
-            await loadStocks(); populateSelects();
+            clearSearchSelect("del");
+            await loadStocks();
+            populateSelects();
         }
-    } catch (e) { setStatus(status, "❌ Failed to delete.", false); }
+    } catch (e) {
+        setStatus(status, "❌ Failed to delete. Please try again.", false);
+    }
 }
 
 async function confirmDeleteAll() {
@@ -424,10 +587,13 @@ async function confirmDeleteAll() {
         if (data.success) {
             toast("All stocks deleted", true);
             setStatus(status, "✅ All stocks deleted.", true);
-            await loadStocks(); populateSelects();
+            await loadStocks();
+            populateSelects();
             document.getElementById("stat-total-val").textContent = "0";
         }
-    } catch (e) { setStatus(status, "❌ Failed.", false); }
+    } catch (e) {
+        setStatus(status, "❌ Failed to delete. Please try again.", false);
+    }
 }
 
 /* ── CHART OPTIONS ─────────────────────────────────────── */
@@ -482,7 +648,7 @@ async function fetchNews(symbol, containerId) {
         const res  = await fetch(`/api/news/${symbol}`);
         const news = await res.json();
         if (news.error || news.length === 0) {
-            container.innerHTML = `<p style="font-size:12px;color:var(--muted)">No recent news found.</p>`;
+            container.innerHTML = `<p style="font-size:12px;color:var(--muted)">No recent news found for ${symbol}.</p>`;
             return;
         }
         let html = '<div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">';
@@ -495,14 +661,16 @@ async function fetchNews(symbol, containerId) {
         });
         html += "</div>";
         container.innerHTML = html;
-    } catch (e) { container.innerHTML = `<p style="font-size:12px;color:var(--red)">Failed to load news.</p>`; }
+    } catch (e) {
+        container.innerHTML = `<p style="font-size:12px;color:var(--red)">❌ Failed to load news for ${symbol}.</p>`;
+    }
 }
 
 async function renderMarketNews() {
     const container = document.getElementById("market-news-feed");
     container.innerHTML = `<div class="loader"><div class="spinner"></div><span style="margin-left:8px;">Aggregating portfolio news...</span></div>`;
     if (!stocks || stocks.length === 0) {
-        container.innerHTML = `<p style="color:var(--muted)">Add some stocks to see news.</p>`; return;
+        container.innerHTML = `<p style="color:var(--muted)">Add some stocks first to see news here.</p>`; return;
     }
     let allNews = [];
     for (const s of stocks.slice(0, 10)) {
@@ -518,7 +686,7 @@ async function renderMarketNews() {
     }
     allNews.sort((a, b) => (!a.pubDate || !b.pubDate) ? 0 : new Date(b.pubDate) - new Date(a.pubDate));
     if (allNews.length === 0) {
-        container.innerHTML = `<p style="color:var(--muted)">No news found across your portfolio.</p>`; return;
+        container.innerHTML = `<p style="color:var(--muted)">No news found across your portfolio right now.</p>`; return;
     }
     let html = '<div style="display:flex;flex-direction:column;gap:16px;max-width:800px;">';
     allNews.forEach(n => {

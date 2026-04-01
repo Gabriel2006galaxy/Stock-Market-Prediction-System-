@@ -11,7 +11,7 @@
         rel="stylesheet" />
     <script
         src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-    <link rel="stylesheet" href="/static/style.css?v=3" />
+    <link rel="stylesheet" href="/static/style.css?v=4" />
 </head>
 
 <body>
@@ -82,7 +82,6 @@
                         <div class="stat-val" id="stat-total-val">—</div>
                         <div class="stat-label">Stocks Tracked</div>
                     </div>
-
                     <div class="stat-card">
                         <div class="stat-val">3</div>
                         <div class="stat-label">AI Models</div>
@@ -145,9 +144,8 @@
                 <p>Candlestick chart and price data for the last 3 months</p>
             </div>
             <div class="control-bar">
-                <select id="view-select" class="styled-select">
-                    <option value="">— Select a stock —</option>
-                </select>
+                <!-- REPLACED: was <select id="view-select"> -->
+                <div id="view-select-wrap" style="flex:1;max-width:340px;position:relative;"></div>
                 <button class="btn-primary" onclick="loadView()">Load Chart</button>
             </div>
             <div id="view-result" class="hidden">
@@ -157,20 +155,13 @@
                     <table class="data-table" id="view-table">
                         <thead>
                             <tr>
-                                <th>Date</th>
-                                <th>Open</th>
-                                <th>High</th>
-                                <th>Low</th>
-                                <th>Close</th>
-                                <th>Volume</th>
+                                <th>Date</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th>
                             </tr>
                         </thead>
                         <tbody></tbody>
                     </table>
                 </div>
-                <div class="section-header">
-                    <h3>Recent News</h3>
-                </div>
+                <div class="section-header"><h3>Recent News</h3></div>
                 <div id="view-news" class="news-wrap"></div>
             </div>
             <div class="loader hidden" id="view-loader">
@@ -205,15 +196,13 @@
             <div class="control-bar two-col">
                 <div>
                     <label class="ctrl-label">First Stock</label>
-                    <select id="cmp-s1" class="styled-select">
-                        <option value="">— Select —</option>
-                    </select>
+                    <!-- REPLACED: was <select id="cmp-s1"> -->
+                    <div id="cmp-s1-wrap" style="position:relative;"></div>
                 </div>
                 <div>
                     <label class="ctrl-label">Second Stock</label>
-                    <select id="cmp-s2" class="styled-select">
-                        <option value="">— Select —</option>
-                    </select>
+                    <!-- REPLACED: was <select id="cmp-s2"> -->
+                    <div id="cmp-s2-wrap" style="position:relative;"></div>
                 </div>
                 <button class="btn-primary" onclick="compareStocks()">Compare</button>
             </div>
@@ -226,18 +215,14 @@
                         <div class="compare-label" id="cmp-label-1"></div>
                         <div id="cmp-chart-1" class="chart-box"></div>
                         <div class="compare-stats" id="cmp-stats-1"></div>
-                        <div class="section-header" style="margin-top:20px">
-                            <h4>Recent News</h4>
-                        </div>
+                        <div class="section-header" style="margin-top:20px"><h4>Recent News</h4></div>
                         <div id="cmp-news-1" class="news-wrap"></div>
                     </div>
                     <div class="compare-panel" id="cmp-panel-2">
                         <div class="compare-label" id="cmp-label-2"></div>
                         <div id="cmp-chart-2" class="chart-box"></div>
                         <div class="compare-stats" id="cmp-stats-2"></div>
-                        <div class="section-header" style="margin-top:20px">
-                            <h4>Recent News</h4>
-                        </div>
+                        <div class="section-header" style="margin-top:20px"><h4>Recent News</h4></div>
                         <div id="cmp-news-2" class="news-wrap"></div>
                     </div>
                 </div>
@@ -252,9 +237,8 @@
             </div>
             <div class="predict-controls">
                 <div class="control-bar">
-                    <select id="pred-select" class="styled-select wide">
-                        <option value="">— Select a stock —</option>
-                    </select>
+                    <!-- REPLACED: was <select id="pred-select"> -->
+                    <div id="pred-select-wrap" style="width:300px;position:relative;"></div>
                 </div>
                 <div class="algo-cards">
                     <label class="algo-card rnn-card">
@@ -285,28 +269,17 @@
                 </div>
             </div>
             <div id="pred-result" class="hidden">
-                <!-- consensus -->
                 <div class="consensus-banner" id="consensus-banner"></div>
-                <!-- leaderboard -->
-                <div class="section-header">
-                    <h3>Accuracy Leaderboard</h3>
-                </div>
+                <div class="section-header"><h3>Accuracy Leaderboard</h3></div>
                 <div class="leaderboard" id="leaderboard"></div>
-                <!-- charts -->
-                <div class="section-header">
-                    <h3>Prediction Charts</h3>
-                </div>
+                <div class="section-header"><h3>Prediction Charts</h3></div>
                 <div class="pred-charts-wrap" id="pred-charts"></div>
-                <!-- tables -->
-                <div class="section-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <div class="section-header" style="display:flex;justify-content:space-between;align-items:center;">
                     <h3>Predicted Price Tables</h3>
                     <button class="btn-primary" onclick="exportPredictionsCSV()">Download CSV ⬇</button>
                 </div>
                 <div class="pred-tables-wrap" id="pred-tables"></div>
-                <!-- news -->
-                <div class="section-header">
-                    <h3>Recent News</h3>
-                </div>
+                <div class="section-header"><h3>Recent News</h3></div>
                 <div id="pred-news" class="news-wrap"></div>
             </div>
         </section>
@@ -321,9 +294,8 @@
                 <div class="manage-card">
                     <h3>Delete Stock</h3>
                     <p>Remove a single stock from your watchlist</p>
-                    <select id="del-select" class="styled-select">
-                        <option value="">— Select a stock —</option>
-                    </select>
+                    <!-- REPLACED: was <select id="del-select"> -->
+                    <div id="del-select-wrap" style="position:relative;"></div>
                     <button class="btn-danger" onclick="deleteStock()">Delete Selected</button>
                     <div class="form-status" id="del-status"></div>
                 </div>
@@ -341,7 +313,7 @@
     <!-- TOAST -->
     <div class="toast" id="toast"></div>
 
-    <script src="/static/app.js?v=7"></script>
+    <script src="/static/app.js?v=8"></script>
 </body>
 
 </html>

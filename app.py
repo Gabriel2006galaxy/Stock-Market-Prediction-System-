@@ -21,7 +21,7 @@ CORS(app)
 
 def get_db():
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL not set in Render")
+        raise Exception("DATABASE_URL not set in environment.")
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def db_fetchall(query, params=()):
@@ -77,14 +77,39 @@ def df_to_records(df):
         })
     return records
 
+def validate_ticker_exists(symbol):
+    """
+    Returns (True, None) if ticker seems valid,
+    or (False, error_message) if not.
+    """
+    try:
+        ticker_obj = yf.Ticker(symbol)
+        info = ticker_obj.info
+        # yfinance returns a minimal dict with just 'trailingPegRatio' for unknown tickers
+        if not info or len(info) <= 1:
+            # Give a specific hint for Indian stocks without suffix
+            upper = symbol.upper()
+            if "." not in upper:
+                return False, (
+                    f"'{symbol}' not found. "
+                    f"If this is an Indian stock, try '{upper}.NS' (NSE) or '{upper}.BO' (BSE). "
+                    f"US stocks need no suffix (e.g. AAPL, MSFT)."
+                )
+            elif upper.endswith(".NS") or upper.endswith(".BO"):
+                return False, (
+                    f"'{symbol}' not found on {'NSE' if upper.endswith('.NS') else 'BSE'}. "
+                    f"Double-check the ticker spelling."
+                )
+            else:
+                return False, f"'{symbol}' not found. Please check the ticker symbol."
+        return True, None
+    except Exception as e:
+        return False, f"Could not verify ticker '{symbol}': {str(e)}"
+
 # Features — all lagged so no data leakage
 FEATURES = ["Lag1","Lag2","Lag3","MA5","MA10","MA20","Return1","Return5","Std5"]
 
 def add_features(df):
-    """
-    Lagged features only — Target = NEXT day's close.
-    No current Close in inputs, so no data leakage.
-    """
     df = df.copy()
     df["Lag1"]    = df["Close"].shift(1)
     df["Lag2"]    = df["Close"].shift(2)
@@ -128,15 +153,10 @@ def run_single_model(tag, df_train, df_eval, df_full,
                      avg_volume, volatility, last_date,
                      results, accuracy, errors):
     try:
-        # ── Build training features ──────────────────────────────────────
         train_feat = add_features(df_train)
         X_train    = train_feat[FEATURES].values
         y_train    = train_feat["Target"].values
 
-        # Models:
-        # RNN  → Ridge regression (regularised linear, no leakage, realistic errors)
-        # LSTM → GradientBoosting (captures non-linear patterns)
-        # GRU  → RandomForest    (ensemble, different predictions from above two)
         scaler = None
         if tag == "RNN":
             scaler = StandardScaler()
@@ -151,8 +171,6 @@ def run_single_model(tag, df_train, df_eval, df_full,
             model = RandomForestRegressor(n_estimators=100, random_state=42)
             model.fit(X_train, y_train)
 
-        # ── Evaluate on held-out last 15 days ───────────────────────────
-        # Prepend 20 rows of training context so all rolling windows are warm
         context   = pd.concat([df_train.tail(20), df_eval])
         eval_feat = add_features(context).iloc[-len(df_eval):]
 
@@ -174,11 +192,8 @@ def run_single_model(tag, df_train, df_eval, df_full,
             "da":   round(da,   1),
         }
 
-        # ── Forecast next 15 trading days (autoregressive) ──────────────
         full_feat  = add_features(df_full)
         last_state = full_feat[FEATURES].values[-1].copy()
-
-        # Track last 20 closes for accurate rolling feature updates
         hist = list(df_full["Close"].values[-20:])
 
         preds = []
@@ -187,19 +202,18 @@ def run_single_model(tag, df_train, df_eval, df_full,
             pred = float(model.predict(scaler.transform(inp) if scaler else inp)[0])
             preds.append(pred)
 
-            # Append prediction and recompute all lagged features
             hist.append(pred)
             arr = np.array(hist)
 
-            last_state[0] = arr[-2]                           # Lag1
-            last_state[1] = arr[-3]                           # Lag2
-            last_state[2] = arr[-4]                           # Lag3
-            last_state[3] = arr[-6:-1].mean()                 # MA5
-            last_state[4] = arr[-11:-1].mean() if len(arr) >= 11 else arr[:-1].mean()  # MA10
-            last_state[5] = arr[-21:-1].mean() if len(arr) >= 21 else arr[:-1].mean()  # MA20
-            last_state[6] = (arr[-2] - arr[-3]) / arr[-3] if arr[-3] != 0 else 0       # Return1
-            last_state[7] = (arr[-2] - arr[-7]) / arr[-7] if len(arr) >= 7 and arr[-7] != 0 else 0  # Return5
-            last_state[8] = arr[-6:-1].std() if len(arr) >= 6 else 0                   # Std5
+            last_state[0] = arr[-2]
+            last_state[1] = arr[-3]
+            last_state[2] = arr[-4]
+            last_state[3] = arr[-6:-1].mean()
+            last_state[4] = arr[-11:-1].mean() if len(arr) >= 11 else arr[:-1].mean()
+            last_state[5] = arr[-21:-1].mean() if len(arr) >= 21 else arr[:-1].mean()
+            last_state[6] = (arr[-2] - arr[-3]) / arr[-3] if arr[-3] != 0 else 0
+            last_state[7] = (arr[-2] - arr[-7]) / arr[-7] if len(arr) >= 7 and arr[-7] != 0 else 0
+            last_state[8] = arr[-6:-1].std() if len(arr) >= 6 else 0
 
         results[tag] = build_future_candles(
             preds, float(df_full["Close"].iloc[-1]),
@@ -225,8 +239,14 @@ def add_stock():
     data   = request.json
     symbol = data.get("symbol", "").upper().strip()
     name   = data.get("name",   "").strip()
-    if not symbol or not name:
-        return jsonify({"error": "Symbol and name required"}), 400
+
+    if not symbol:
+        return jsonify({"error": "Ticker symbol is required."}), 400
+    if not name:
+        return jsonify({"error": "Company name is required."}), 400
+    if " " in symbol:
+        return jsonify({"error": f"Ticker '{symbol}' contains spaces. Please remove them."}), 400
+
     try:
         db_execute(
             "INSERT INTO companies(symbol, name) VALUES(%s,%s) ON CONFLICT (symbol) DO NOTHING",
@@ -234,7 +254,7 @@ def add_stock():
         )
         return jsonify({"success": True, "symbol": symbol, "name": name})
     except Exception as e:
-        return jsonify({"error": str(e)}), 409
+        return jsonify({"error": f"Could not save stock: {str(e)}"}), 409
 
 @app.route("/api/stocks/<symbol>", methods=["DELETE"])
 def delete_stock(symbol):
@@ -248,11 +268,18 @@ def delete_all_stocks():
 
 @app.route("/api/view/<symbol>")
 def view_stock(symbol):
+    symbol = symbol.upper()
     try:
         df = yf.download(symbol, period="3mo", auto_adjust=False, progress=False)
+        df = clean_ohlcv(df)
+
         if df.empty:
-            return jsonify({"error": "No data found"}), 404
-        df      = clean_ohlcv(df)
+            # Try to give a specific reason
+            valid, err_msg = validate_ticker_exists(symbol)
+            if not valid:
+                return jsonify({"error": err_msg}), 404
+            return jsonify({"error": f"No price data available for '{symbol}'. It may be newly listed or delisted."}), 404
+
         records = df_to_records(df.tail(60))
         chg     = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
         pct     = (chg / float(df["Close"].iloc[0])) * 100
@@ -263,17 +290,28 @@ def view_stock(symbol):
             "percent": round(pct, 2),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Failed to load data for '{symbol}': {str(e)}"}), 500
 
 @app.route("/api/compare")
 def compare_stocks():
-    s1 = request.args.get("s1", "")
-    s2 = request.args.get("s2", "")
+    s1 = request.args.get("s1", "").upper()
+    s2 = request.args.get("s2", "").upper()
+
+    if not s1 or not s2:
+        return jsonify({"error": "Two stock symbols are required for comparison."}), 400
+    if s1 == s2:
+        return jsonify({"error": "Please select two different stocks to compare."}), 400
+
     try:
         d1 = clean_ohlcv(yf.download(s1, period="1mo", auto_adjust=False, progress=False))
         d2 = clean_ohlcv(yf.download(s2, period="1mo", auto_adjust=False, progress=False))
-        if d1.empty or d2.empty:
-            return jsonify({"error": "No data"}), 404
+
+        if d1.empty and d2.empty:
+            return jsonify({"error": f"No data found for either '{s1}' or '{s2}'. Check both tickers."}), 404
+        if d1.empty:
+            return jsonify({"error": f"No data found for '{s1}'. Check the ticker symbol."}), 404
+        if d2.empty:
+            return jsonify({"error": f"No data found for '{s2}'. Check the ticker symbol."}), 404
 
         def stats(df):
             chg = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
@@ -290,22 +328,34 @@ def compare_stocks():
 
         return jsonify({"stock1": stats(d1), "stock2": stats(d2)})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Comparison failed: {str(e)}"}), 500
 
 @app.route("/api/predict/<symbol>")
 def predict_stock(symbol):
+    symbol = symbol.upper()
     models_param = request.args.get("models", "RNN,LSTM,GRU").split(",")
     models_param = [m.strip().upper() for m in models_param
                     if m.strip().upper() in ("RNN", "LSTM", "GRU")]
     if not models_param:
-        return jsonify({"error": "No valid models specified"}), 400
+        return jsonify({"error": "No valid models specified. Choose from RNN, LSTM, GRU."}), 400
 
     try:
         df = clean_ohlcv(yf.download(symbol, period="4y", auto_adjust=False, progress=False))
+
         if df.empty:
-            return jsonify({"error": f"No data found for {symbol}."}), 404
+            valid, err_msg = validate_ticker_exists(symbol)
+            if not valid:
+                return jsonify({"error": err_msg}), 404
+            return jsonify({"error": f"No price data available for '{symbol}'. It may be newly listed or delisted."}), 404
+
         if len(df) < 60:
-            return jsonify({"error": f"Not enough historical data for {symbol}."}), 400
+            return jsonify({
+                "error": (
+                    f"Only {len(df)} days of data found for '{symbol}'. "
+                    f"At least 60 days of history is needed to run predictions. "
+                    f"This stock may be too recently listed."
+                )
+            }), 400
 
         volatility = float(df["Close"].pct_change().dropna().std())
         avg_volume = int(df["Volume"].mean())
@@ -326,7 +376,7 @@ def predict_stock(symbol):
 
         if not results:
             all_errors = "; ".join(f"{t}: {e}" for t, e in errors.items())
-            return jsonify({"error": f"All models failed — {all_errors}"}), 500
+            return jsonify({"error": f"All models failed to train. Details: {all_errors}"}), 500
 
         actual_candles = df_to_records(df.tail(20))
 
@@ -356,13 +406,16 @@ def predict_stock(symbol):
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Prediction failed for '{symbol}': {str(e)}"}), 500
 
 @app.route("/api/news/<symbol>")
 def get_news(symbol):
+    symbol = symbol.upper()
     try:
         tkr      = yf.Ticker(symbol)
         raw_news = tkr.news
+        if not raw_news:
+            return jsonify([])
         cleaned  = []
         for n in raw_news[:5]:
             if "content" in n:
@@ -380,7 +433,7 @@ def get_news(symbol):
                             "summary": summary, "pubDate": str(pub)})
         return jsonify(cleaned)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Could not fetch news for '{symbol}': {str(e)}"}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
