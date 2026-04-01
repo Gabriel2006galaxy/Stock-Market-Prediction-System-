@@ -303,10 +303,17 @@ def add_stock():
                 return jsonify({"error": f"No price data found for '{symbol}'."}), 404
     except Exception as e:
         return jsonify({"error": f"Could not verify ticker '{symbol}': {str(e)}"}), 500
+    
+    # 🔥 CHECK IF STOCK ALREADY EXISTS
+    existing = db_execute(
+    "SELECT * FROM companies WHERE symbol = %s",
+    (symbol,)).fetchone()
+    if existing:
+        return jsonify({"error": "Stock already there"}), 400
 
     try:
         db_execute(
-            "INSERT INTO companies(symbol, name) VALUES(%s,%s) ON CONFLICT (symbol) DO NOTHING",
+            "INSERT INTO companies(symbol, name) VALUES(%s,%s)",
             (symbol, name)
         )
         return jsonify({"success": True, "symbol": symbol, "name": name})
