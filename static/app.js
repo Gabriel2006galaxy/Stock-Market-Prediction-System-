@@ -705,3 +705,4 @@ async function renderMarketNews() {
     html += "</div>";
     container.innerHTML = html;
 }
+}
