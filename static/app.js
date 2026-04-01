@@ -756,7 +756,8 @@ async function renderMarketNews() {
     let html = '<div style="display:flex;flex-direction:column;gap:16px;max-width:800px;">';
     allNews.forEach(n => {
         const d = n.pubDate ? new Date(n.pubDate).toLocaleString() : "Recent";
-        html += `<div style="background:var(--bg2);padding:18px;border-radius:10px;border:1px solid var(--border);">
+        html += `<div style="position:relative;background:var(--bg2);padding:18px;border-radius:10px;border:1px solid var(--border);">
+            ${getFaceSVG(n.sentiment)}
             <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
                 <span style="background:rgba(0,229,255,0.1);color:var(--accent);padding:6px 12px;border-radius:5px;font-size:12px;font-weight:bold;">${n.stockName} (${n.stockSymbol})</span>
                 <span style="color:var(--muted);font-size:12px;">${d}</span></div>
