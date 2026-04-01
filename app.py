@@ -245,7 +245,7 @@ def run_single_model(tag, df_train, df_eval, df_full,
         preds = []
         for _ in range(15):
             inp  = last_state.reshape(1, -1)
-            pred = float(model.predict(scaler.transform(inp) if scaler else X_eval)[0])
+            pred = float(model.predict(scaler.transform(inp) if scaler else inp)[0])
             preds.append(pred)
 
             hist.append(pred)
@@ -546,12 +546,10 @@ def get_news(symbol):
                 link    = n.get("link", "")
                 summary = n.get("summary", "")
                 pub     = n.get("providerPublishTime", "")
-            cleaned.append({
-                "title": title,
-                "link": link,
-                "summary": summary,
-                "pubDate": str(pub)
-            })
+            sentiment = analyze_sentiment(title + " " + summary)
+            cleaned.append({"title": title, "link": link,
+                            "summary": summary, "pubDate": str(pub),
+                            "sentiment": sentiment})
         return jsonify(cleaned)
     except Exception as e:
         return jsonify({"error": f"Could not fetch news for '{symbol}': {str(e)}"}), 500
