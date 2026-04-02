@@ -1171,10 +1171,24 @@ body {
     color: var(--muted);
     text-align: center;
 }
+/* ── FIX EMOJI OVERLAP IN .news-wrap ── */
 .news-wrap {
-    position: relative;
+    line-height: 1.5;
 }
 
 .news-wrap * {
-    padding-right: 40px;
+    line-height: 1.5;
+    vertical-align: middle;
+}
+
+/* keep emoji and text on the same line with a small gap */
+.news-wrap span,
+.news-wrap b,
+.news-wrap strong,
+.news-wrap i,
+.news-wrap em,
+.news-wrap small {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
 }
