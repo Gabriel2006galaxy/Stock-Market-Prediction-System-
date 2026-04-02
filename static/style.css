@@ -1180,28 +1180,3 @@ body {
     line-height: 1.5;
 }
 
-/* treat each injected news item as a flex row */
-#market-news-feed > *,
-#view-news > *,
-#cmp-news-1 > *,
-#cmp-news-2 > *,
-#pred-news > * {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 0;
-    line-height: 1.5;
-    vertical-align: middle;
-}
-
-/* if any wrapper is inline, make it inline-flex */
-.news-wrap span,
-.news-wrap a,
-.news-wrap b,
-.news-wrap em,
-.news-wrap small {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    line-height: 1;
-}
