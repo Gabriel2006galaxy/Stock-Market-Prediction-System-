@@ -753,17 +753,65 @@ async function renderMarketNews() {
     if (allNews.length === 0) {
         container.innerHTML = `<p style="color:var(--muted)">No news found across your portfolio right now.</p>`; return;
     }
-    let html = '<div style="display:flex;flex-direction:column;gap:16px;max-width:800px;">';
-    allNews.forEach(n => {
-        const d = n.pubDate ? new Date(n.pubDate).toLocaleString() : "Recent";
-        html += `<div style="position:relative;background:var(--bg2);padding:18px;border-radius:10px;border:1px solid var(--border);">
-            ${getFaceSVG(n.sentiment)}
-            <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
-                <span style="background:rgba(0,229,255,0.1);color:var(--accent);padding:6px 12px;border-radius:5px;font-size:12px;font-weight:bold;">${n.stockName} (${n.stockSymbol})</span>
-                <span style="color:var(--muted);font-size:12px;">${d}</span></div>
-            <a href="${n.link}" target="_blank" style="color:#fff;text-decoration:none;font-size:17px;font-family:'Syne',sans-serif;font-weight:bold;margin-bottom:8px;display:block;">${n.title}</a>
-            <p style="color:var(--text);font-size:13px;line-height:1.6;">${n.summary}</p></div>`;
-    });
+    // Store all news globally so search can filter without re-fetching
+    window.allPortfolioNews = allNews;
+    renderNewsWithFilter("");
+}
+
+function renderNewsWithFilter(query) {
+    const container = document.getElementById("market-news-feed");
+    const allNews   = window.allPortfolioNews || [];
+
+    const filtered = query
+        ? allNews.filter(n =>
+            n.stockSymbol.toLowerCase().includes(query.toLowerCase()) ||
+            n.stockName.toLowerCase().includes(query.toLowerCase()))
+        : allNews;
+
+    let html = `
+        <div style="margin-bottom:20px;position:relative;">
+            <input 
+                id="news-search-input"
+                type="text"
+                placeholder="🔍 Search by company or ticker…"
+                oninput="renderNewsWithFilter(this.value)"
+                value="${query}"
+                style="width:100%;max-width:400px;background:var(--bg3);border:1px solid var(--border);
+                       border-radius:6px;color:var(--text);font-family:'Space Mono',monospace;
+                       font-size:13px;padding:11px 14px;outline:none;transition:border .2s;"
+                onfocus="this.style.borderColor='var(--accent)'"
+                onblur="this.style.borderColor='var(--border)'"
+            />
+            <span style="font-size:11px;color:var(--muted);margin-left:12px;">${filtered.length} article${filtered.length !== 1 ? "s" : ""}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px;max-width:800px;">
+    `;
+
+    if (filtered.length === 0) {
+        html += `<p style="color:var(--muted)">No news found for "${query}".</p>`;
+    } else {
+        filtered.forEach(n => {
+            const d = n.pubDate ? new Date(n.pubDate).toLocaleString() : "Recent";
+            html += `<div style="position:relative;background:var(--bg2);padding:18px;border-radius:10px;border:1px solid var(--border);">
+                ${getFaceSVG(n.sentiment)}
+                <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
+                    <span style="background:rgba(0,229,255,0.1);color:var(--accent);padding:6px 12px;border-radius:5px;font-size:12px;font-weight:bold;">${n.stockName} (${n.stockSymbol})</span>
+                    <span style="color:var(--muted);font-size:12px;">${d}</span></div>
+                <a href="${n.link}" target="_blank" style="color:#fff;text-decoration:none;font-size:17px;font-family:'Syne',sans-serif;font-weight:bold;margin-bottom:8px;display:block;">${n.title}</a>
+                <p style="color:var(--text);font-size:13px;line-height:1.6;">${n.summary}</p></div>`;
+        });
+    }
+
     html += "</div>";
     container.innerHTML = html;
-}
+
+    // Keep focus in search box after re-render
+    if (query) {
+        const inp = document.getElementById("news-search-input");
+        if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); 
+      }
+    }
+
+
+
+    
