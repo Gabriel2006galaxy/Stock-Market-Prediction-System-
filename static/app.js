@@ -704,7 +704,7 @@ async function fetchNews(symbol, containerId) {
             const d = n.pubDate ? new Date(n.pubDate).toLocaleDateString() : "Recent";
 
             html += `
-            <div style="position:relative;background:var(--bg3);padding:14px;border-radius:8px;border:1px solid var(--border);">
+            <div style="position:relative;background:var(--bg3);padding:14px 54px 14px 14px;border-radius:8px;border:1px solid var(--border);">
 
                 ${face}
 
