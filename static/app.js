@@ -716,7 +716,7 @@ async function fetchNews(symbol, containerId) {
                     ${n.summary}
                 </p>
 
-                <div style="color:var(--muted);font-size:10px;margin-top:8px;">
+                <div style="color:var(--muted);font-size:10px;margin-top:8px;padding-right:44px;">
                     ${d}
                 </div>
 
@@ -798,7 +798,7 @@ function renderNewsWithFilter(query) {
                     <span style="background:rgba(0,229,255,0.1);color:var(--accent);padding:6px 12px;border-radius:5px;font-size:12px;font-weight:bold;">${n.stockName} (${n.stockSymbol})</span>
                     <span style="color:var(--muted);font-size:12px;">${d}</span></div>
                 <a href="${n.link}" target="_blank" style="color:#fff;text-decoration:none;font-size:17px;font-family:'Syne',sans-serif;font-weight:bold;margin-bottom:8px;display:block;">${n.title}</a>
-                <p style="color:var(--text);font-size:13px;line-height:1.6;">${n.summary}</p></div>`;
+                <p style="color:var(--text);font-size:13px;line-height:1.6;padding-right:44px;">${n.summary}</p></div>`;
         });
     }
 
