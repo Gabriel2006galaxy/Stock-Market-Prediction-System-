@@ -808,9 +808,9 @@ function renderNewsWithFilter(query) {
     // Keep focus in search box after re-render
     if (query) {
         const inp = document.getElementById("news-search-input");
-        if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); 
-      }
+        if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
     }
+}
 
 
 
