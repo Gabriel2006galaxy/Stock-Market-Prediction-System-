@@ -1171,3 +1171,7 @@ body {
     color: var(--muted);
     text-align: center;
 }
+/* FIX: prevent emoji overlapping date/time */
+.news-date {
+    padding-right: 40px;
+}
