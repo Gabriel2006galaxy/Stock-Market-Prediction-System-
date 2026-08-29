@@ -27,12 +27,44 @@ CORS(app)
 
 def get_db():
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL not set in environment.")
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+        raise RuntimeError("DATABASE_URL not set in environment.")
+
+    try:
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
+    except Exception:
+        return psycopg2.connect(DATABASE_URL)
+
+
+def init_db():
+    if not DATABASE_URL:
+        print("Database initialization skipped: DATABASE_URL not set.")
+        return False
+
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS companies (
+                symbol TEXT PRIMARY KEY,
+                name   TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as exc:
+        print(f"Database initialization skipped: {exc}")
+        return False
 
 
 def db_fetchall(query, params=()):
-    conn = get_db()
+    try:
+        conn = get_db()
+    except Exception:
+        if not init_db():
+            raise
+        conn = get_db()
+
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(query, params)
     rows = cur.fetchall()
@@ -41,27 +73,17 @@ def db_fetchall(query, params=()):
 
 
 def db_execute(query, params=()):
-    conn = get_db()
+    try:
+        conn = get_db()
+    except Exception:
+        if not init_db():
+            raise
+        conn = get_db()
+
     cur  = conn.cursor()
     cur.execute(query, params)
     conn.commit()
     conn.close()
-
-
-def init_db():
-    conn = get_db()
-    cur  = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS companies (
-            symbol TEXT PRIMARY KEY,
-            name   TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-init_db()
 
 
 def analyze_sentiment(text):
